@@ -47,7 +47,7 @@ getgenv().config = {
     teleportLoopEnabled = false, teleportLoopDelay = 1.5,
 }
 
-local ROOT_FOLDER        = "meowwCL"
+local ROOT_FOLDER        = "Milka"
 local PROFILES_FOLDER    = ROOT_FOLDER .. "/profiles"
 local GLOBAL_CFG_FILE    = ROOT_FOLDER .. "/global_config.json"
 local ACTIVE_PROFILE_FILE = ROOT_FOLDER .. "/active_profile.txt"
@@ -146,7 +146,7 @@ end
 pcall(ensureFolders)
 pcall(loadGlobalConfig)
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/Library.lua"))()
-local Window = Library:CreateWindow({ Title = "meowwCL Premium", Center = true, AutoShow = true, Resizable = true, MobileButtonsSide = "Right" })
+local Window = Library:CreateWindow({ Title = "Milka HVH", Center = true, AutoShow = true, Resizable = true, MobileButtonsSide = "Right" })
 
 local function Notify(title, desc)
     Library:Notify({ Title = title, Description = desc, Time = 3 })
@@ -1000,8 +1000,8 @@ CfgBox:AddButton("List Profiles",        function()
     if #names == 0 then Notify("Profiles", "No profiles saved.")
     else Notify("Profiles", table.concat(names, ", ")) end
 end)
-CfgBox:AddButton("Save Config to File",  function() saveGlobalConfig() Notify("Config", "Saved to meowwCL/global_config.json") end)
-CfgBox:AddButton("Load Config from File", function() loadGlobalConfig() Notify("Config", "Loaded from meowwCL/global_config.json") end)
+CfgBox:AddButton("Save Config to File",  function() saveGlobalConfig() Notify("Config", "Saved to Milka/global_config.json") end)
+CfgBox:AddButton("Load Config from File", function() loadGlobalConfig() Notify("Config", "Loaded from Milka/global_config.json") end)
 CfgBox:AddButton("Reset Config to Defaults", function()
     getgenv().config = {
         nc = false, flyEnabled = false, flySpeed = 50, doubleJumpEnabled = false,
@@ -1052,4 +1052,4 @@ task.spawn(function()
     end
 end)
 
-Notify("meowwCL prem loaded successfully")
+Notify("Milka prem loaded successfully")
