@@ -1,0 +1,2145 @@
+warn("[mehfil] Loading...")
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+if not table.find then
+    table.find = function(t, val)
+        for i = 1, #t do if t[i] == val then return i end end
+        return nil
+    end
+end
+
+local function TP_ComputePos(t, tpMethod, tpMinDist, tpMaxDist,
+                              dXp, dXm, dYp, dYm, dZp, dZm)
+    if tpMethod == "Custom" then return t.Position + Vector3.new(dXp - dXm, dYp - dYm, dZp - dZm) end
+    local lo = math.min(tpMinDist, tpMaxDist); local hi = math.max(tpMinDist, tpMaxDist)
+    local d = (lo == hi) and lo or (lo + math.random() * (hi - lo))
+    local look = (typeof(t) == "Instance" and t.CFrame and t.CFrame.LookVector) or Vector3.new(0, 0, -1)
+    if tpMethod == "Behind"      then return t.Position - look * d
+    elseif tpMethod == "Ahead"   then return t.Position + look * d
+    elseif tpMethod == "Above"   then return t.Position + Vector3.new(0, d, 0)
+    elseif tpMethod == "AboveAhead" then return t.Position + look * d + Vector3.new(0, 3, 0)
+    elseif tpMethod == "Random"  then local a = math.random() * math.pi * 2; return t.Position + Vector3.new(math.cos(a) * d, 0, math.sin(a) * d)
+    elseif tpMethod == "Stutter" then local a = (tick() * 25) % (math.pi * 2); return t.Position + Vector3.new(math.cos(a) * d, 0, math.sin(a) * 0.5)
+    end
+    return t.Position
+end
+
+local function TP_SafeTeleport(me, cframe)
+    if not me or not cframe then return false end
+    pcall(function()
+        me.AssemblyLinearVelocity = Vector3.zero; me.AssemblyAngularVelocity = Vector3.zero; me.CFrame = cframe
+        local model = me.Parent; if model and model:IsA("Model") then pcall(function() model:PivotTo(cframe) end) end
+    end)
+    return true
+end
+
+local voidRandomFlip = true
+local function TP_VoidRandomizer()
+    local lo, hi = 100000, 500000
+    local rx, ry, rz = math.random(lo, hi), math.random(lo, hi), math.random(lo, hi)
+    if not voidRandomFlip then rx, ry, rz = -rx, -ry, -rz end
+    voidRandomFlip = not voidRandomFlip
+    return Vector3.new(rx, ry, rz)
+end
+
+local function TP_VoidExtreme()
+    local EDGE = 240000; local uid = game:GetService("Players").LocalPlayer.UserId
+    return Vector3.new(EDGE + ((uid * 73) % 4001) - 2000, EDGE, EDGE + ((uid * 131) % 4001) - 2000)
+end
+
+task.spawn(function()
+    pcall(LPH_NO_VIRTUALIZE and LPH_NO_VIRTUALIZE(function()
+        local bypassed = false
+
+        local kKickNames = {"Kick", "kick"}
+
+        local kProtectedProperties = {Enabled = true, Disabled = false}
+
+        local kSlotMap = {
+            [69]  = 2, [138] = 3, [207] = 4, [276] = 5, [345] = 6, [414] = 7,
+        }
+
+        local kFilledSub = {1, 2, 3, 4, 5}
+
+        local Players = cloneref(game:GetService("Players"))
+        local ReplicatedFirst = cloneref(game:GetService("ReplicatedFirst"))
+        local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+        local ScriptContext = cloneref(game:GetService("ScriptContext"))
+        local LocalPlayer = Players.LocalPlayer
+
+        local ac_script = ReplicatedFirst:WaitForChild("LocalScript3")
+        local ac_event = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("RemoteEvent")
+
+        local last = nil
+        local first_seen = false
+        local hijack_ready = false
+        local client_id
+        local expected_interval = 0.6
+        local min_interval = 0.25
+        local ema_alpha = 0.5
+        local samples = 0
+        local hidden_fn = {}
+        local max_stack_depth = 128
+
+        if not setstackhidden then
+            local function ValidTraceback(s)
+                local dotPos = string.find(s, "%.")
+                local colonPos = string.find(s, ":")
+                if not dotPos then return false end
+                if not colonPos then return true end
+                return dotPos < colonPos
+            end
+
+            local function TracebackLines(str, lvl)
+                local pos = lvl
+                return function()
+                    if not pos then return nil end
+                    local p1, p2 = string.find(str, "\r?\n", pos)
+                    local line
+                    if p1 then line = str:sub(pos, p1 - 1); pos = p2 + 1
+                    else line = str:sub(pos); pos = nil end
+                    return line
+                end
+            end
+
+            local old_dbg_traceback
+            old_dbg_traceback = hookfunction(getrenv().debug.traceback, function(...)
+                if checkcaller() or not (pcall(old_dbg_traceback, ...)) then return old_dbg_traceback(...) end
+                local StartingString, StackLevel = ...
+                local Traceback = old_dbg_traceback(...)
+                local NewTraceback = {}
+                if typeof(StartingString) == "string" or typeof(StartingString) == "number" then
+                    table.insert(NewTraceback, tostring(StartingString))
+                end
+                if typeof(StackLevel) ~= "number" or not tonumber(StackLevel) then StackLevel = 1
+                else StackLevel = math.floor(tonumber(StackLevel)) end
+                for Line in TracebackLines(Traceback, StackLevel) do
+                    if not ValidTraceback(Line) then continue end
+                    table.insert(NewTraceback, Line)
+                end
+                return table.concat(NewTraceback, "\n") .. "\n"
+            end)
+
+            local old_dbg_info
+            old_dbg_info = hookfunction(getrenv().debug.info, function(...)
+                local ToInspect, LevelOrInfo, _ThreadInfo = ...
+                if checkcaller() or typeof(ToInspect) == "function" or typeof(ToInspect) == "thread"
+                    or not pcall(function(LevelOrInfo) old_dbg_info(function() end, LevelOrInfo) end, LevelOrInfo) then
+                    return old_dbg_info(...)
+                end
+                ToInspect = math.floor(ToInspect)
+                local ReconstructedConstructedStack = {}
+                for Level = 2, max_stack_depth do
+                    local Function, Source, Line, Name, NumberOfArgs, Varargs = old_dbg_info(Level, "fslna")
+                    if not Function or not Source or not Line or not Name then break end
+                    if isexecutorclosure(Function) and not hidden_fn[Function] then continue end
+                    table.insert(ReconstructedConstructedStack, {
+                        f = Function, s = Source, l = Line, n = Name, a = { NumberOfArgs, Varargs },
+                    })
+                end
+                local InfoLevel = ReconstructedConstructedStack[ToInspect + 1]
+                if not InfoLevel then return old_dbg_info(3e4, LevelOrInfo) end
+                local ReturnResult = {}
+                for idx, info in string.split(LevelOrInfo, "") do
+                    local Value = InfoLevel[info]
+                    if typeof(Value) == "table" then for _, v in Value do table.insert(ReturnResult, v) end; continue end
+                    table.insert(ReturnResult, Value)
+                end
+                return table.unpack(ReturnResult, 1, #ReturnResult)
+            end)
+
+            local old_getfenv
+            old_getfenv = hookfunction(getrenv().getfenv, function(...)
+                if checkcaller() then return old_getfenv(...) end
+                local ToInspect = ...
+                local Success, ResultingEnv = pcall(function()
+                    if typeof(ToInspect) == "number" and ToInspect >= 0 then return old_getfenv(ToInspect + 3) end
+                    return old_getfenv(ToInspect)
+                end)
+                if not Success then
+                    if typeof(ToInspect) == "number" and ToInspect >= 0 then return old_getfenv(ToInspect + 3) end
+                    return old_getfenv(ToInspect)
+                end
+                if ToInspect == nil or typeof(ToInspect) == "function" then return ResultingEnv end
+                ToInspect = math.floor(ToInspect)
+                local ReconstructedConstructedStack = {}
+                for Level = 1, max_stack_depth do
+                    local StackInfoSuccess, Data = pcall(function()
+                        return {Environement = old_getfenv(Level + 3), Function = old_dbg_info(Level + 3, "f")}
+                    end)
+                    if not StackInfoSuccess or not Data then break end
+                    local Environement = Data.Environement
+                    local Function = Data.Function
+                    if typeof(Environement["getgenv"]) == "function" and isexecutorclosure(Environement["getgenv"]) then
+                        if shared.Hooking.IncludeInStackFunctions[Function] then
+                            Environement = setmetatable(ResultingEnv, {__index = getrenv()})
+                        else continue end
+                    end
+                    table.insert(ReconstructedConstructedStack, Environement)
+                end
+                local InfoLevel = ReconstructedConstructedStack[ToInspect + 1]
+                if not InfoLevel then return old_getfenv(3e4) end
+                return InfoLevel
+            end)
+        end
+
+        setstackhidden = setstackhidden or function(fn_or_level, hidden)
+            assert(typeof(hidden) == "boolean", "hidden must be boolean")
+            local ok, fn = pcall(function()
+                if typeof(fn_or_level) == "number" then return debug.info(fn_or_level + 2, "f") end
+                return fn_or_level
+            end)
+            assert(ok and fn, "invalid argument #1 to 'setstackhidden'")
+            hidden_fn[fn] = not hidden
+        end
+
+        local TrustedFunctions = setmetatable({}, {__mode = "k"})
+        local function TrustFunction(fn) if type(fn) == "function" then TrustedFunctions[fn] = true end; return fn end
+        local function IsTrustedFunction(fn) return TrustedFunctions[fn] == true end
+
+        local SafeHook = function(hookfn, ...)
+            local args = {...}
+            local func, inst, metamethod, detour
+            if hookfn == hookmetamethod then inst = args[1]; metamethod = args[2]; detour = args[3]
+            else func = args[1]; detour = args[2] end
+            local original_func
+            if hookfn == hookfunction and iscclosure(func) then detour = newcclosure(detour) end
+            if not iscclosure(detour) then detour = newcclosure(detour) end
+            setstackhidden(detour, true)
+            local ok, _ = pcall(function()
+                TrustFunction(detour)
+                if hookfn == hookmetamethod then original_func = hookfn(inst, metamethod, detour)
+                else original_func = hookfn(func, detour) end
+            end)
+            if not ok then LocalPlayer:Kick("[AethSec]: Bypass failed! n1") end
+            return original_func
+        end
+
+        local SafeCall = function(func, ...)
+            if checkcaller() then return func(...) end
+            local old = getthreadidentity()
+            if old ~= 2 then setthreadidentity(2) end
+            local result = {func(...)}
+            if old ~= 2 then setthreadidentity(old) end
+            return table.unpack(result)
+        end
+
+        local monitor_conn = ScriptContext.Error:Connect(TrustFunction(function(message, stack, _)
+            message = tostring(message); stack = tostring(stack)
+            if stack:find("PlayerScripts.Controllers.MiscellaneousController") and message:find("attempt to index number with number") then
+                LocalPlayer:Kick("[AethSec]: Bypass failed! n2")
+            end
+        end))
+
+        local oldindex; oldindex = SafeHook(hookmetamethod, ac_script, "__index", function(t, k)
+            local is_caller = not bypassed and checkcaller()
+            if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
+                return kProtectedProperties[k]
+            end
+            if checkcaller() then return oldindex(t, k) end
+            return SafeCall(oldindex, t, k)
+        end)
+
+        local oldnewindex; oldnewindex = SafeHook(hookmetamethod, ac_script, "__newindex", function(t, k, v)
+            local is_caller = not bypassed and checkcaller()
+            if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
+                kProtectedProperties[k] = v
+                if k == "Enabled" then kProtectedProperties["Disabled"] = not v end
+                if k == "Disabled" then kProtectedProperties["Enabled"] = not v end
+                return
+            end
+            if checkcaller() then return oldnewindex(t, k, v) end
+            return SafeCall(oldnewindex, t, k, v)
+        end)
+
+        client_id = ""
+        last = tick()
+
+        local oldfireserver; oldfireserver = SafeHook(hookfunction, ac_event.FireServer, function(self, ...)
+            local now = tick()
+            local args = {...}
+            if not first_seen then
+                first_seen = true
+                local first_arg = args[1]
+                if type(first_arg) == "table" and #first_arg >= 1 and (type(first_arg[1]) == "string" or type(first_arg[1]) == "number") then
+                    client_id = tostring(first_arg[1])
+                else client_id = client_id or "" end
+                last = tick()
+                samples = 1
+                hijack_ready = true
+                local res = SafeCall(oldfireserver, self, ...)
+                return res
+            end
+            local interval = now - (last or now)
+            if interval > 0 then
+                if samples == 0 then expected_interval = interval
+                else expected_interval = ema_alpha * interval + (1 - ema_alpha) * expected_interval end
+                samples = samples + 1
+                if expected_interval < min_interval then expected_interval = min_interval end
+            end
+            local res = SafeCall(oldfireserver, self, ...)
+            last = tick()
+            return res
+        end)
+
+        local BuildSubTable = function()
+            local num_empty = math.random(1, 5)
+            local empty_map = {}
+            local empty_slots = {7}
+            empty_map[7] = true
+            while #empty_slots < num_empty do
+                local slot = math.random(1, 6)
+                if not empty_map[slot] then empty_map[slot] = true; table.insert(empty_slots, slot) end
+            end
+            table.sort(empty_slots)
+            local result = {}
+            for i = 1, 7 do
+                if empty_map[i] then result[i] = {} else result[i] = kFilledSub end
+            end
+            return result, empty_slots
+        end
+
+        local ApplyTransforms = function(t, mask, empty_slots)
+            local payload = t[1]
+            local outer_index = #payload
+            local inner_index = empty_slots[math.random(1, #empty_slots)]
+            local derived
+            local outer_val = payload[outer_index]
+            if type(outer_val) == "table" and type(inner_index) == "number" then
+                derived = outer_val[inner_index]
+            else
+                for i = outer_index, 1, -1 do
+                    if type(payload[i]) ~= "table" then continue end
+                    local candidate = payload[i]
+                    if type(inner_index) == "number" and candidate[inner_index] ~= nil then
+                        derived = candidate[inner_index]; break
+                    else derived = candidate; break end
+                end
+                if derived == nil then derived = {} end
+            end
+            local written = {}
+            local kSlotMapRef = kSlotMap
+            for _, value in ipairs(mask) do
+                local slot = kSlotMapRef[value]
+                if slot and not written[slot] then t[slot] = derived; written[slot] = true end
+            end
+            return t
+        end
+
+        local BuildPayload = function(challenge, mask)
+            local sub_table, empty_slots = BuildSubTable()
+            local total_idx = math.random(1, 8)
+            local payload = {client_id, buffer.tostring(challenge)}
+            local extra_strings = math.random(0, 2)
+            for _ = 1, extra_strings do payload[#payload + 1] = "" end
+            while #payload < (total_idx - 1) do payload[#payload + 1] = math.random(5, 100000) end
+            payload[#payload + 1] = sub_table
+            local t = {payload, {}, nil, nil, nil, nil, nil}
+            return ApplyTransforms(t, mask, empty_slots)
+        end
+
+        task.spawn(function()
+            getfenv().script = ac_script
+            while not hijack_ready do task.wait() end
+            ac_script.Enabled = false
+            ac_event.OnClientEvent:Connect(function(...)
+                last = tick()
+                local remote = Instance.new("RemoteEvent", nil)
+                remote:FireServer()
+                local t = {...}
+                local challenge = t[1]; local index = t[2]; local mask = t[3]
+                if typeof(challenge) ~= "buffer" or type(index) ~= "number" or type(mask) ~= "table" then
+                    LocalPlayer:Kick("[AethSec]: Bypass failed! n3")
+                end
+                local payload = BuildPayload(challenge, mask)
+                task.defer(function()
+                    local since_last = tick() - (last or 0)
+                    local desired_wait = expected_interval - since_last
+                    if desired_wait > 0 then task.wait(desired_wait) end
+                    ac_event:FireServer(table.unpack(payload, 1, 5))
+                    last = tick()
+                    remote:Destroy()
+                end)
+            end)
+            bypassed = true
+            monitor_conn:Disconnect()
+        end)
+
+        for _, name in ipairs(kKickNames) do
+            local func = LocalPlayer[name]
+            if type(func) ~= "function" then return end
+            local oldfunc; oldfunc = SafeHook(hookfunction, func, function(self, ...)
+                if self == LocalPlayer and not checkcaller() then return nil end
+                return oldfunc(self, ...)
+            end)
+        end
+
+        for _, conn in ipairs(getconnections(ScriptContext.Error)) do
+            if not conn.Function then continue end
+            if IsTrustedFunction(conn.Function) then continue end
+            SafeHook(hookfunction, conn.Function, function(...) return nil end)
+        end
+
+        SafeHook(hookfunction, ScriptContext.Error.Connect, function(...) return nil end)
+
+        while not bypassed do task.wait(0.5) end
+        task.wait(1)
+    end) or warn("[mehfil] Anti-cheat bypass skipped (LPH_NO_VIRTUALIZE not available)"))
+end)
+
+local mehfil_ok, mehfil_err = pcall(function()
+
+local LIB_PASTEBIN = 'https://pastebin.com/raw/tbjPdguL'
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'local Library = loadstring(game:HttpGet(LIB_PASTEBIN))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager  = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+Library.MainColor       = Color3.fromRGB(24, 24, 24)
+Library.AccentColor     = Color3.fromRGB(93, 93, 93)
+Library.OutlineColor    = Color3.fromRGB(50, 50, 50)
+Library.BackgroundColor = Color3.fromRGB(0, 0, 0)
+Library.FontColor       = Color3.fromRGB(255, 255, 255)
+Library.AccentColorDark = Library:GetDarkerColor(Library.AccentColor)
+
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local UIS = game:GetService('UserInputService')
+local TweenService = game:GetService('TweenService')
+local Camera = workspace.CurrentCamera
+if not Camera then local cc; cc = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() Camera = workspace.CurrentCamera; if Camera then cc:Disconnect() end end) end
+local ColSvc = game:GetService('CollectionService')
+local LP = Players.LocalPlayer
+local CoreGui = game:GetService('CoreGui')
+local Debris = game:GetService('Debris')
+
+local v_ok, vimObj = pcall(function() return game:GetService('VirtualInputManager') end)
+local VIM = v_ok and vimObj or nil
+local _holder, _mopen = nil, false
+local function _open() return _holder ~= nil and _holder.Visible == true end
+if VIM then
+    UIS.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.Touch and _open() then pcall(VIM.SendMouseButtonEvent, VIM, i.Position.X, i.Position.Y, 0, true, 1, false) end end)
+    UIS.InputChanged:Connect(function(i) if i.UserInputType == Enum.UserInputType.Touch and _open() then pcall(VIM.SendMouseMovementEvent, VIM, i.Position.X, i.Position.Y, workspace) end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.Touch and _open() then pcall(VIM.SendMouseButtonEvent, VIM, i.Position.X, i.Position.Y, 0, false, 1, false) end end)
+end
+
+local S = {}
+
+S.espEnabled = false; S.espBox = false; S.espBoxColor = Color3.new(1,1,1)
+S.espBoxOutlineColor = Color3.new(0,0,0); S.espBoxThickness = 1
+S.espHealth = false; S.espHealthColor = Color3.new(0,1,0)
+S.espName = false; S.espNameColor = Color3.new(1,1,1); S.espNameSize = 13; S.espNameFont = 1
+S.espDistance = false; S.espDistColor = Color3.new(1,1,1); S.espDistSize = 12
+S.espSnaplines = false; S.espSnapColor = Color3.new(1,1,1); S.espSnapThickness = 1; S.espSnapOrigin = "Bottom"
+S.espTracers = false; S.espTracerColor = Color3.new(1,1,1); S.espTracerThickness = 1
+S.espTeamCheck = true; S.espMaxDist = 1000; S.espFonts = {[1]=Enum.Font.SourceSans,[2]=Enum.Font.Gotham,[3]=Enum.Font.Ubuntu,[4]=Enum.Font.FredokaOne,[5]=Enum.Font.Roboto}
+
+S.aimEnabled = false; S.aimSmoothness = 1; S.aimFOVRadius = 200; S.aimShowFOV = false
+S.aimFollowTarget = false; S.aimFollowMuzzle = false; S.aimFollowSmoothness = 0
+S.aimFOVCfg = {
+    OutlineColor1 = Color3.new(1,1,1), OutlineColor2 = Color3.new(1,1,1),
+    OutlineRotation = 0, OutlineThickness = 1.5, OutlineTransparency = 0,
+    FilledEnabled = false, FilledColor1 = Color3.new(1,1,1), FilledColor2 = Color3.new(0,0,0),
+    FilledRotation = 0, FilledTransparency = 0.7, FilledAnimated = false, FilledSpeed = 1,
+    SpinOn = false, SpinSpd = 1
+}
+S.fovRenderConn = nil
+
+S.silentEnabled = false; S.silentHitPart = "Head"; S.silentFOVRadius = 300; S.silentShowFOV = true
+S.silentHitChance = 100; S.silentFollowTarget = false; S.silentFollowMuzzle = false; S.silentFollowSmoothness = 0
+S.silentFOVCfg = {
+    OutlineColor1 = Color3.new(1,1,1), OutlineColor2 = Color3.new(1,1,1),
+    OutlineRotation = 0, OutlineThickness = 1.5, OutlineTransparency = 0,
+    FilledEnabled = false, FilledColor1 = Color3.new(1,1,1), FilledColor2 = Color3.new(0,0,0),
+    FilledRotation = 0, FilledTransparency = 0.7, FilledAnimated = false, FilledSpeed = 1,
+    SpinOn = false, SpinSpd = 1
+}
+
+S.voidActive = false; S.voidConn = nil
+
+S.orbActive = false; S.orbConn = nil; S.orbAngle = 0; S.orbSpeed = 1.0; S.orbRadius = 6.0; S.orbHeight = 4.0
+S.orbPhase = 0; S.orbStyle = "Circle"; S.orbSemiStrafe = false; S.orbTarget = "Closest"
+
+S.aaEnabled = false; S.aaPitch = "None"; S.aaYaw = 45; S.aaMode = "None"; S.aaSpeed = 15
+S.aaConn = nil; S.spinAngle = 0; S.jitterAngle = 0; S.aaSpin = false
+
+S.arEnabled = false; S.arDist = 10; S.arHeight = 0; S.arRate = 0.5
+
+S.acEnabled = false; S.acConn = nil
+
+S.fakeLagEnabled = false; S.fakeLagAmount = 100; S.fakeLagConn = nil
+S.cfDesyncEnabled = false; S.cfDesyncIntensity = 50; S.cfDesyncConn = nil; S.cfDesyncRenderConn = nil; S.cfDesyncRealCF = nil
+S.resolverEnabled = false; S.resolverIntensity = 100; S.resolverConn = nil
+
+S.rfEnabled = false; S.mbEnabled = false
+
+S.frEnabled = false
+
+S.tpActive = false; S.tpConn = nil; S.tpMethod = "Behind"; S.tpTarget = "Closest"
+S.tpMinDist = 3; S.tpMaxDist = 8; S.tpSpamRate = 0.03; S.tpLast = 0
+S.teamCheck = true; S.autoOpp = true; S.autoOppNtf = false
+S.dXp = 0; S.dXm = 0; S.dYp = 0; S.dYm = 0; S.dZp = 0; S.dZm = 0
+S.cycVoid = 0; S.cycEnemy = 0; S.cycPhase = "void"; S.cycLast = 0; S.cycNtf = false
+
+S.crossEnabled = false; S.crossColor = Color3.new(0,1,0); S.crossSize = 15; S.crossThick = 2; S.crossGap = 4; S.crossSpin = false; S.crossSpinSpeed = 2; S.crossConn = nil
+
+S.tgEnabled = false; S.tgDelay = 0.1; S.tgLast = 0; S.tgKey = "MouseButton2"; S.tgConn = nil
+
+S.wsEnabled = false; S.walkSpeed = 16; S.jpEnabled = false; S.jumpPower = 50; S.gvEnabled = false; S.gravity = 196.2; S.mmConn = nil
+
+S.hbEnabled = false; S.hbSize = 1.5; S.hbConn = nil; S.hbTargets = {}
+
+S.wmEnabled = true
+
+S.noShootAnim = false; S.noSprintAnim = false; S.noEquipAnim = false; S.noReloadAnim = false
+S.noMotion = false; S.noCamShake = false; S.noCamSway = false; S.noFlashbang = false; S.noMuzzleFlash = false; S.rmvConn = nil
+
+S.thirdPerson = false; S.tpCamConn = nil
+
+S.chamsEnabled = false; S.chamsColor = Color3.new(1,0,0); S.chamsTransparency = 0.5; S.chamsGlow = false; S.chamsConn = nil; S.chamsAdornments = {}
+
+S.flyEnabled = false; S.flyConn = nil; S.flySpeed = 50; S.ncEnabled = false
+S.ncFrames = 0; S.djEnabled = false
+
+S.fpEnabled = false; S.fpConn = nil; S.fpRenderConn = nil; S.fpRealCF = nil
+
+S.dsEnabled = false; S.dsConn = nil; S.dsRenderConn = nil; S.dsRealVel = nil
+
+S.blEnabled = false; S.blConn = nil; S.blAnchor = nil; S.blRadius = 80; S.blRate = 60
+
+S.evEnabled = false; S.evConn = nil; S.evIntensity = 3.0
+
+S.trEnabled = false; S.trColor = Color3.new(1,1,1); S.trStyle = "Line"; S.trGlow = 0
+S.trSize = 1; S.trDuration = 3; S.trFadeTime = 0.5; S.trActiveTracers = {}; S.trCleanup = true
+S.trTextures = { ["Line"]="", ["Beam"]="rbxassetid://12781852245", ["Lightning"]="rbxassetid://446111271", ["Neon"]="rbxassetid://6361963422", ["Laser"]="rbxassetid://14549123968" }
+
+S.hsEnabled = false; S.hsStyle = "Rust HS"; S.hsVolume = 0.5; S.hsPitch = 1.0
+S.hsLastCheck = 0; S.hsTargetHP = setmetatable({}, {__mode="k"}); S.hsConn = nil
+S.hsAssets = { ["Rust HS"]="rbxassetid://5043539486", ["Neverlose"]="rbxassetid://97643101798871", ["Minecraft"]="rbxassetid://5869422451", ["CSGO"]="rbxassetid://5764885315", ["Bubble"]="rbxassetid://6534947588", ["Bonk"]="rbxassetid://5766898159", ["Fatality"]="rbxassetid://6534947869", ["Skeet"]="rbxassetid://5633695679", ["Bruh"]="rbxassetid://4578740568", ["Fart"]="rbxassetid://130833677", ["Gamesense"]="rbxassetid://4817809188", ["Call of Duty"]="rbxassetid://5952120301", ["TF2"]="rbxassetid://2868331684" }
+
+S.wbEnabled = false; S.wbLastShot = 0
+
+S.weatherEnabled = false; S.weatherType = "Rain"; S.weatherVolume = 1; S.weatherSpeed = 1
+S.weatherSize = 1; S.weatherDensity = 100; S.weatherColor = Color3.new(1,1,1)
+S.weatherSound = nil; S.weatherPart = nil; S.weatherEmitter = nil
+S.weatherSounds = { ["Rain"]="rbxassetid://365362615", ["Snow"]="rbxassetid://3102348867" }
+
+S.mbEnabled = false; S.mbIntensity = 0.5
+
+S.bloomEnabled = false; S.bloomIntensity = 0.5; S.bloomSize = 24; S.bloomThreshold = 0.8
+
+S.srEnabled = false; S.srIntensity = 0.5; S.srSpread = 0.5
+
+S.ccEnabled = false; S.ccBrightness = 0; S.ccContrast = 0; S.ccSaturation = 0; S.ccTintColor = Color3.new(1,1,1)
+
+S.fogEnabled = false; S.fogColor = Color3.new(0.7,0.7,0.7); S.fogStart = 0; S.fogEnd = 500
+
+S.shadowSoftness = 0.5; S.customTime = false; S.timeHour = 12; S.customBrightness = 2
+
+S.atmoEnabled = false; S.atmoDensity = 0.3; S.atmoOffset = 0.25; S.atmoHaze = 1; S.atmoGlare = 0
+S.atmoColor = Color3.new(1,1,1); S.atmoDecay = Color3.new(0.5,0.5,0.5)
+
+S.fovGui = nil
+S.aimFOVContainer=nil;S.aimFOVFill=nil;S.aimFOVFillGrad=nil;S.aimFOVStroke=nil;S.aimFOVStrokeGrad=nil
+S.silFOVContainer=nil;S.silFOVFill=nil;S.silFOVFillGrad=nil;S.silFOVStroke=nil;S.silFOVStrokeGrad=nil
+S.aimFOVSmoothPos = Vector2.new(0,0); S.silFOVSmoothPos = Vector2.new(0,0)
+S.aimFOVSmoothInit = false; S.silFOVSmoothInit = false
+S.aimFOVSmoothInit = false; S.silFOVSmoothInit = false
+
+_G.Config = _G.Config or {}
+_G.Config.Box = _G.Config.Box or {MasterEnabled=false, Enable=true, OutlineColor=Color3.new(1,1,1), OutlineColor2=Color3.new(0,0,0), HealthLerpColors={Color1=Color3.new(0,1,0), Color2=Color3.new(1,1,0), Color3=Color3.new(1,0,0)}, Healthbar={Enable=false}}
+_G.Config.Filled = _G.Config.Filled or {Enable=false, Transparency=0.7, ColorStart=Color3.new(1,1,1), ColorEnd=Color3.new(0.5,0.5,1), Animated=false, Speed=1, Rotation=0}
+_G.Config.Glow = _G.Config.Glow or {Enable=false, Transparency=0.5, ColorStart=Color3.new(1,1,1), ColorEnd=Color3.new(0,0,1), Rotation=0}
+_G.Config.TextESP = _G.Config.TextESP or {Names=false, Tools=false, Distance=false, NameSize=13, NameColor=Color3.new(1,1,1), NameColor2=Color3.new(1,1,1), ToolsSize=11, ToolColor=Color3.new(1,1,1), ToolColor2=Color3.new(1,1,1), DistanceSize=11, DistanceColor=Color3.new(1,1,1), DistanceColor2=Color3.new(1,1,1)}
+_G.Config.Tracers = _G.Config.Tracers or {Enable=false, Color=Color3.new(1,1,1), Color2=Color3.new(1,1,1), Thickness=1, FromBottom=true}
+_G.Config.Chams = _G.Config.Chams or {Enable=false, Color=Color3.new(1,0,0), Color2=Color3.new(1,0,0), Transparency=0.5}
+_G.Config.Skeleton = _G.Config.Skeleton or {Enable=false}
+_G.Config.ESP = _G.Config.ESP or {TargetHz=240, HealthLerpSpeed=32, HighRefresh=true}
+
+_G.ESPObjects = _G.ESPObjects or {}
+local ESPObjects = _G.ESPObjects
+local ConfigBox = _G.Config.Box
+local guiinset = Vector2.zero
+local tickval = 0
+
+local espgui = Instance.new("ScreenGui")
+espgui.Name = "MehfilESP"; espgui.DisplayOrder = 999; espgui.ResetOnSpawn = false
+espgui.IgnoreGuiInset = true; espgui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+espgui.Parent = (gethui and pcall(gethui) and gethui()) or CoreGui
+
+local function espWorldToScreen(pos)
+    local sp, on = Camera:WorldToViewportPoint(pos)
+    if on then return Vector2.new(sp.X, sp.Y), true end
+    return nil, false
+end
+local function espScreenAnchor(x, y)
+    return Vector2.new(Camera.ViewportSize.X * x, Camera.ViewportSize.Y * y)
+end
+local function playerweap(p)
+    local char = p.Character; if not char then return "" end
+    for _, tool in ipairs(char:GetChildren()) do
+        if tool:IsA("Tool") and tool:FindFirstChild("Handle") then return tool.Name end
+    end
+    return ""
+end
+local function lerpcolor(a, b, t)
+    return Color3.new(a.R+(b.R-a.R)*t, a.G+(b.G-a.G)*t, a.B+(b.B-a.B)*t)
+end
+local function ensureTextGradient(label, color1, color2)
+    if not label then return end
+    local grad = label:FindFirstChild("EspTextGradient")
+    if not grad then grad = Instance.new("UIGradient"); grad.Name = "EspTextGradient"; grad.Rotation = 0; grad.Parent = label end
+    grad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0,color1), ColorSequenceKeypoint.new(1,color2)})
+    label.TextColor3 = Color3.new(1,1,1)
+end
+local function hpcolor(pct)
+    local hc = ConfigBox.HealthLerpColors or {Color1=Color3.new(0,1,0), Color2=Color3.new(1,1,0), Color3=Color3.new(1,0,0)}
+    if pct > 0.5 then return lerpcolor(hc.Color2, hc.Color1, (pct-0.5)*2)
+    else return lerpcolor(hc.Color3, hc.Color2, pct*2) end
+end
+local function checkteammate(player)
+    if not player or player == LP then return true end
+    if S.espTeamCheck == false then return false end
+    local myTeam = LP:GetAttribute("TeamID"); local theirTeam = player:GetAttribute("TeamID")
+    if myTeam ~= nil and theirTeam ~= nil then return myTeam == theirTeam end
+    return LP.Team and player.Team and LP.Team == player.Team
+end
+local function dist2(player)
+    local char = player.Character; local myChar = LP.Character
+    if char and myChar then
+        local root = char:FindFirstChild("HumanoidRootPart"); local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+        if root and myRoot then return (root.Position - myRoot.Position).Magnitude end
+    end
+    return math.huge
+end
+local function espknock(player)
+    local char = player.Character; if not char then return false end
+    local bodyEffects = char:FindFirstChild("BodyEffects")
+    if bodyEffects then local ko = bodyEffects:FindFirstChild("K.O") or bodyEffects:FindFirstChild("KO"); return ko and ko.Value end
+    return false
+end
+local function makelabel(parent)
+    local label = Instance.new("TextLabel", parent)
+    label.Size = UDim2.new(0,200,0,20); label.BackgroundTransparency = 1; label.TextColor3 = Color3.new(1,1,1)
+    label.TextStrokeTransparency = 0; label.TextScaled = false; label.TextSize = 13
+    label.TextStrokeColor3 = Color3.new(0,0,0)
+    pcall(function() label.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json") end)
+    label.TextXAlignment = Enum.TextXAlignment.Left; label.TextYAlignment = Enum.TextYAlignment.Top
+    return label
+end
+local function getHitboxBounds(char)
+    local cam = Camera; if not cam or not char then return nil, nil end
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge; local found = false
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and part.Transparency < 1 and part.Size.Magnitude > 0 then
+            local cf, sz = part.CFrame, part.Size
+            local corners = {cf*Vector3.new(-sz.X/2,-sz.Y/2,-sz.Z/2),cf*Vector3.new(sz.X/2,-sz.Y/2,-sz.Z/2),cf*Vector3.new(-sz.X/2,sz.Y/2,-sz.Z/2),cf*Vector3.new(sz.X/2,sz.Y/2,-sz.Z/2),cf*Vector3.new(-sz.X/2,-sz.Y/2,sz.Z/2),cf*Vector3.new(sz.X/2,-sz.Y/2,sz.Z/2),cf*Vector3.new(-sz.X/2,sz.Y/2,sz.Z/2),cf*Vector3.new(sz.X/2,sz.Y/2,sz.Z/2)}
+            for _, corner in ipairs(corners) do
+                local sp, ok = espWorldToScreen(corner)
+                if ok then found = true; minX = math.min(minX, sp.X); minY = math.min(minY, sp.Y); maxX = math.max(maxX, sp.X); maxY = math.max(maxY, sp.Y) end
+            end
+        end
+    end
+    if not found then return nil, nil end
+    return Vector2.new(math.max(maxX-minX,4), math.max(maxY-minY,8)), Vector2.new(minX, minY)
+end
+
+local function CreateBox(player)
+    if ESPObjects[player] then return end
+    local box = {}
+    box.box = {}
+    box.box.square = pcall(Drawing.new, "Square") and Drawing.new("Square") or nil; if box.box.square then box.box.square.Thickness = 1; box.box.square.Filled = false; box.box.square.Visible = false end
+    box.box.outline = pcall(Drawing.new, "Square") and Drawing.new("Square") or nil; if box.box.outline then box.box.outline.Thickness = 1; box.box.outline.Filled = false; box.box.outline.Visible = false end
+    box.box.inline = pcall(Drawing.new, "Square") and Drawing.new("Square") or nil; if box.box.inline then box.box.inline.Thickness = 1; box.box.inline.Filled = false; box.box.inline.Visible = false end
+
+    box.filled = Instance.new("Frame", espgui)
+    box.filled.BackgroundColor3 = Color3.new(1,1,1); box.filled.BackgroundTransparency = _G.Config.Filled.Transparency
+    box.filled.BorderSizePixel = 0; box.filled.Visible = false; box.filled.ZIndex = 2
+    box.filled_gradient = Instance.new("UIGradient", box.filled)
+    box.filled_gradient.Color = ColorSequence.new({ColorSequenceKeypoint.new(0,_G.Config.Filled.ColorStart), ColorSequenceKeypoint.new(1,_G.Config.Filled.ColorEnd)})
+    box.filled_gradient.Rotation = 0
+
+    box.glow = Instance.new("ImageLabel", espgui)
+    box.glow.Image = "rbxassetid://110204605000367"; box.glow.ScaleType = Enum.ScaleType.Slice
+    box.glow.SliceCenter = Rect.new(Vector2.new(21,21), Vector2.new(79,79)); box.glow.BackgroundTransparency = 1
+    box.glow.BorderSizePixel = 0; box.glow.ZIndex = 1; box.glow.Visible = false
+    box.glow_gradient = Instance.new("UIGradient", box.glow)
+
+    local glowpadding = Instance.new("UIPadding", box.glow)
+    glowpadding.PaddingTop = UDim.new(0,21); glowpadding.PaddingBottom = UDim.new(0,20)
+    glowpadding.PaddingLeft = UDim.new(0,21); glowpadding.PaddingRight = UDim.new(0,20)
+
+    box.bars = {}; box.bars.hp_bars = {}; local ok, d = pcall(Drawing.new, "Square"); box.bars.hp_outline = ok and d or nil; box.bars.last_hp = 1
+    for i = 1, 50 do local ok2, d2 = pcall(Drawing.new, "Line"); box.bars.hp_bars[i] = ok2 and d2 or nil; if box.bars.hp_bars[i] then box.bars.hp_bars[i].Visible = false end end
+
+    local studsgui = Instance.new("ScreenGui", espgui); local namegui = Instance.new("ScreenGui", espgui)
+    local toolgui = Instance.new("ScreenGui", espgui)
+    box.text = {}
+    box.text.studs = makelabel(studsgui); box.text.tool = makelabel(toolgui); box.text.name = makelabel(namegui)
+
+    local okT, dT = pcall(Drawing.new, "Line"); box.Tracer = okT and dT or {Visible=false, Color=Color3.new(1,1,1), Thickness=1}
+    if okT then box.Tracer.Visible = false; box.Tracer.Color = _G.Config.Tracers.Color or Color3.new(1,1,1); box.Tracer.Thickness = _G.Config.Tracers.Thickness or 1 end
+
+    ESPObjects[player] = box
+end
+
+local function RemoveBox(player)
+    if not ESPObjects[player] then return end
+    local box = ESPObjects[player]
+    if box.box then if box.box.square then box.box.square:Remove() end; if box.box.outline then box.box.outline:Remove() end; if box.box.inline then box.box.inline:Remove() end end
+    if box.filled then box.filled:Destroy() end
+    if box.glow then box.glow:Destroy() end
+    if box.text then
+        if box.text.studs then pcall(function() box.text.studs.Parent:Destroy() end) end
+        if box.text.tool then pcall(function() box.text.tool.Parent:Destroy() end) end
+        if box.text.name then pcall(function() box.text.name.Parent:Destroy() end) end
+    end
+    if box.bars then
+        if box.bars.hp_outline then box.bars.hp_outline:Remove() end
+        for _, line in pairs(box.bars.hp_bars) do if line then line:Remove() end end
+    end
+    if box.Tracer and okT then box.Tracer:Remove() end
+    ESPObjects[player] = nil
+end
+
+local function hideesp(player)
+    if not ESPObjects[player] then return end
+    local box = ESPObjects[player]
+    if box.box then if box.box.square then box.box.square.Visible = false end; if box.box.outline then box.box.outline.Visible = false end; if box.box.inline then box.box.inline.Visible = false end end
+    if box.filled then box.filled.Visible = false end
+    if box.glow then box.glow.Visible = false end
+    if box.text then box.text.studs.Visible = false; box.text.tool.Visible = false; box.text.name.Visible = false end
+    if box.bars then
+        if box.bars.hp_outline then box.bars.hp_outline.Visible = false end
+        for _, line in pairs(box.bars.hp_bars) do if line then line.Visible = false end end
+    end
+    if box.Tracer then if box.Tracer.Visible ~= nil then box.Tracer.Visible = false end end
+end
+
+local function drawbox(player, box, size, position)
+    if not (ConfigBox.MasterEnabled and ConfigBox.Enable) or not box or not box.box then
+        if box and box.box then if box.box.square then box.box.square.Visible = false end; if box.box.outline then box.box.outline.Visible = false end; if box.box.inline then box.box.inline.Visible = false end end; return
+    end
+    local w, h = math.max(math.floor(size.X),4), math.max(math.floor(size.Y),8)
+    position = Vector2.new(math.floor(position.X), math.floor(position.Y))
+    box.box.square.Visible = true; box.box.square.Position = position; box.box.square.Size = Vector2.new(w,h)
+    box.box.square.Color = lerpcolor(ConfigBox.OutlineColor, ConfigBox.OutlineColor2 or ConfigBox.OutlineColor, 0.5)
+    box.box.square.Thickness = 1
+    if box.box.outline then box.box.outline.Visible = true; box.box.outline.Position = position - Vector2.new(1,1) end
+    if box.box.outline then box.box.outline.Size = Vector2.new(w+2, h+2); box.box.outline.Color = Color3.new(0,0,0); box.box.outline.Thickness = 1 end
+    if box.box.inline then box.box.inline.Visible = true; box.box.inline.Position = position + Vector2.new(1,1) end
+    if box.box.inline then box.box.inline.Size = Vector2.new(math.max(w-2,2), math.max(h-2,4)); box.box.inline.Color = Color3.new(0,0,0); box.box.inline.Thickness = 1 end
+end
+
+local function drawfill(player, box, size, position)
+    local cfg = _G.Config.Filled
+    if not cfg.Enable then box.filled.Visible = false; return end
+    box.filled.Visible = true; box.filled.BackgroundTransparency = cfg.Transparency
+    box.filled.Position = UDim2.fromOffset(position.X, position.Y); box.filled.Size = UDim2.fromOffset(size.X, size.Y)
+    box.filled_gradient.Color = ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.ColorStart), ColorSequenceKeypoint.new(1,cfg.ColorEnd)})
+    if cfg.Animated then box.filled_gradient.Rotation = (math.sin(tickval*cfg.Speed)*90)+cfg.Rotation
+    else box.filled_gradient.Rotation = cfg.Rotation end
+end
+
+local function drawglow(player, box, size, position)
+    local cfg = _G.Config.Glow
+    if not cfg.Enable or not (ConfigBox.MasterEnabled and ConfigBox.Enable) then box.glow.Visible = false; return end
+    box.glow.Visible = true; box.glow.ImageTransparency = cfg.Transparency; box.glow.ImageColor3 = cfg.ColorStart
+    box.glow.Position = UDim2.fromOffset(position.X-21, position.Y-21); box.glow.Size = UDim2.fromOffset(size.X+42, size.Y+42)
+    box.glow_gradient.Color = ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.ColorStart), ColorSequenceKeypoint.new(1,cfg.ColorEnd)})
+    box.glow_gradient.Rotation = 0
+end
+
+local function drawtext(player, box, size, position, distance)
+    local basey = position.Y
+    if _G.Config.TextESP and _G.Config.TextESP.Names then
+        box.text.name.Visible = true
+        box.text.name.Position = UDim2.new(0, position.X+(size.X/2)-100, 0, basey-15)
+        box.text.name.Text = player.Name; box.text.name.TextSize = _G.Config.TextESP.NameSize or 13
+        ensureTextGradient(box.text.name, _G.Config.TextESP.NameColor or Color3.new(1,1,1), _G.Config.TextESP.NameColor2 or _G.Config.TextESP.NameColor or Color3.new(1,1,1))
+        box.text.name.TextXAlignment = Enum.TextXAlignment.Center
+    else box.text.name.Visible = false end
+    if _G.Config.TextESP and _G.Config.TextESP.Distance then
+        box.text.studs.Visible = true
+        box.text.studs.Position = UDim2.new(0, position.X+(size.X/2)-100, 0, basey+size.Y+2)
+        box.text.studs.Text = string.format("%.0f studs", distance); box.text.studs.TextSize = _G.Config.TextESP.DistanceSize or 11
+        ensureTextGradient(box.text.studs, _G.Config.TextESP.DistanceColor or Color3.new(1,1,1), _G.Config.TextESP.DistanceColor2 or _G.Config.TextESP.DistanceColor or Color3.new(1,1,1))
+        box.text.studs.TextXAlignment = Enum.TextXAlignment.Center
+    else box.text.studs.Visible = false end
+end
+
+local function drawtracers(player, box, root)
+    if not (_G.Config.Tracers and _G.Config.Tracers.Enable) or not box or not box.Tracer then
+        if box and box.Tracer and box.Tracer.Visible ~= nil then box.Tracer.Visible = false end; return
+    end
+    local pos, vis = espWorldToScreen(root.Position)
+    if vis then
+        box.Tracer.Visible = true; box.Tracer.To = Vector2.new(pos.X, pos.Y)
+        box.Tracer.From = (_G.Config.Tracers.FromBottom == nil or _G.Config.Tracers.FromBottom) and espScreenAnchor(0.5,1) or espScreenAnchor(0.5,0.5)
+        box.Tracer.Color = lerpcolor(_G.Config.Tracers.Color or Color3.new(1,1,1), _G.Config.Tracers.Color2 or _G.Config.Tracers.Color or Color3.new(1,1,1), 0.5)
+        box.Tracer.Thickness = _G.Config.Tracers.Thickness or 1
+    else box.Tracer.Visible = false end
+end
+
+local function drawhealthbar(player, box, hum, size, position, dt)
+    local hbCfg = ConfigBox.Healthbar or {Enable=false}
+    if not hbCfg.Enable or not box or not box.bars then
+        if box and box.bars then if box.bars.hp_outline then box.bars.hp_outline.Visible = false end end
+        if box and box.bars then for _, line in pairs(box.bars.hp_bars) do if line then line.Visible = false end end end
+        return
+    end
+    local target = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+    local last = box.bars.last_hp or target
+    local espCfg = _G.Config.ESP or {}
+    local lerpSpeed = espCfg.HealthLerpSpeed or 32
+    if espCfg.HighRefresh ~= false then
+        dt = dt or (1/(espCfg.TargetHz or 240))
+        box.bars.last_hp = last + (target-last)*math.min(1, dt*lerpSpeed)
+    else box.bars.last_hp = last + (target-last)*0.05 end
+    local lerped = box.bars.last_hp
+    local h = math.ceil(size.Y*lerped); local hpx = position.X-5; local hpystart = position.Y+(size.Y-h)
+    box.bars.hp_outline.Visible = true
+    box.bars.hp_outline.Position = Vector2.new(hpx-1, position.Y-1); box.bars.hp_outline.Size = Vector2.new(3, size.Y+2)
+    box.bars.hp_outline.Color = Color3.new(0,0,0); box.bars.hp_outline.Filled = false
+    local segments = math.max(math.min(math.floor(h/2), 50), 10)
+    for i = 1, 50 do
+        local line = box.bars.hp_bars[i]
+        if i <= segments then
+            local segmentheight = h/segments; local yoffset = (i-1)*segmentheight
+            local pospct = 1-((yoffset+(size.Y-h))/size.Y)
+            line.Visible = true; line.From = Vector2.new(hpx, hpystart+yoffset); line.To = Vector2.new(hpx+1, hpystart+yoffset)
+            line.Color = hpcolor(pospct); line.Thickness = math.max(segmentheight, 1)
+        else line.Visible = false end
+    end
+end
+
+local function updateesp(player, dt)
+    if not player or not ESPObjects[player] then return end
+    if not ConfigBox.MasterEnabled then hideesp(player); return end
+    if player == LP or checkteammate(player) then hideesp(player); return end
+    local char = player.Character
+    if not char or espknock(player) then hideesp(player); return end
+    local root = char:FindFirstChild("HumanoidRootPart"); local hum = char:FindFirstChildWhichIsA("Humanoid")
+    if not root or not hum or hum.Health <= 0 then hideesp(player); return end
+    local distance = dist2(player)
+    if S.espMaxDist and distance > S.espMaxDist then hideesp(player); return end
+    local hrp2d, hrpOk = espWorldToScreen(root.Position)
+    if not hrpOk then hideesp(player); return end
+    local hitboxSize, hitboxPosition = getHitboxBounds(char)
+    local size, position
+    if hitboxSize and hitboxPosition then
+        size = Vector2.new(math.max(math.floor(hitboxSize.X),4), math.max(math.floor(hitboxSize.Y),8))
+        position = Vector2.new(math.floor(hitboxPosition.X), math.floor(hitboxPosition.Y))
+    else
+        local head = char:FindFirstChild("Head")
+        local topWorld = (head and head.Position+Vector3.new(0,0.5,0)) or (root.Position+Vector3.new(0,3,0))
+        local bottomWorld = root.Position-Vector3.new(0,3,0)
+        local top2d, topOk = espWorldToScreen(topWorld); local bottom2d, bottomOk = espWorldToScreen(bottomWorld)
+        if not topOk or not bottomOk then hideesp(player); return end
+        local boxHeight = math.abs(bottom2d.Y-top2d.Y); local boxWidth = math.max(boxHeight*0.55, 8)
+        size = Vector2.new(math.max(math.floor(boxWidth),4), math.max(math.floor(math.max(boxHeight,10)),8))
+        position = Vector2.new(math.floor(hrp2d.X-size.X/2), math.floor(math.min(top2d.Y, bottom2d.Y)))
+    end
+    local box = ESPObjects[player]
+    drawfill(player, box, size, position)
+    drawbox(player, box, size, position)
+    drawglow(player, box, size, position)
+    drawhealthbar(player, box, hum, size, position, dt)
+    drawtext(player, box, size, position, distance)
+    drawtracers(player, box, root)
+end
+
+local ESP_RENDER_BIND = "MehfilESP_Drawing"
+local _espMasterWasOn = false
+
+local function espStepUpdate(dt)
+    dt = dt or (1/(_G.Config.ESP and _G.Config.ESP.TargetHz or 240))
+    tickval = os.clock()
+    if not ConfigBox.MasterEnabled then
+        if _espMasterWasOn then
+            _espMasterWasOn = false
+            for plr in pairs(ESPObjects) do hideesp(plr) end
+        end
+        return
+    end
+    _espMasterWasOn = true
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            if not ESPObjects[plr] then CreateBox(plr) end
+            updateesp(plr, dt)
+        end
+    end
+end
+
+local espBindOk = pcall(function()
+    RunService:UnbindFromRenderStep(ESP_RENDER_BIND)
+    RunService:BindToRenderStep(ESP_RENDER_BIND, Enum.RenderPriority.Camera.Value + 1, espStepUpdate)
+end)
+if not espBindOk then
+    S.espRenderConn = RunService.RenderStepped:Connect(espStepUpdate)
+end
+
+local function espBindAll()
+    ConfigBox.MasterEnabled = true; S.espEnabled = true
+    _espMasterWasOn = false
+    local espParent = (gethui and pcall(gethui) and gethui()) or CoreGui
+    if not espgui or not espgui.Parent then
+        espgui.Parent = espParent
+    end
+    pcall(function() RunService:UnbindFromRenderStep(ESP_RENDER_BIND) end)
+    if S.espRenderConn then S.espRenderConn:Disconnect(); S.espRenderConn = nil end
+    local ok = pcall(function()
+        RunService:BindToRenderStep(ESP_RENDER_BIND, Enum.RenderPriority.Camera.Value + 1, espStepUpdate)
+    end)
+    if not ok then S.espRenderConn = RunService.RenderStepped:Connect(espStepUpdate) end
+end
+local function espUnbind()
+    ConfigBox.MasterEnabled = false; S.espEnabled = false
+    pcall(function() RunService:UnbindFromRenderStep(ESP_RENDER_BIND) end)
+    if S.espRenderConn then S.espRenderConn:Disconnect(); S.espRenderConn = nil end
+    for plr in pairs(ESPObjects) do RemoveBox(plr) end
+end
+
+local function createInitialBoxes()
+    local players = Players:GetPlayers()
+    local BATCH = 3
+    for i = 1, #players, BATCH do
+        for j = i, math.min(i + BATCH - 1, #players) do
+            if players[j] ~= LP then pcall(CreateBox, players[j]) end
+        end
+        task.wait()
+    end
+end
+task.spawn(createInitialBoxes)
+Players.PlayerAdded:Connect(function(player)
+    if player ~= LP then CreateBox(player) end
+end)
+Players.PlayerRemoving:Connect(RemoveBox)
+
+local function isTeammate(p)
+    if not S.teamCheck then return false end
+    local a, b = LP:GetAttribute("TeamID"), p:GetAttribute("TeamID")
+    return a and b and a ~= "" and a == b
+end
+local function IsSameTeam(p)
+    local a, b = LP:GetAttribute("TeamID"), p:GetAttribute("TeamID")
+    return a and b and a ~= "" and a == b
+end
+local function MyHRP() local c = LP.Character; return c and c:FindFirstChild("HumanoidRootPart") end
+
+local function EnemyList(fn)
+    fn = fn or isTeammate; local out = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character then
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 and not fn(p) then out[#out+1] = {name=p.Name, hrp=hrp, root=p.Character} end
+        end
+    end
+    return out
+end
+local function ClosestEnemy()
+    local me = MyHRP(); if not me then return nil, nil end
+    local best, bestD, bestChar = nil, math.huge, nil
+    for _, e in ipairs(EnemyList()) do
+        local d = (me.Position - e.hrp.Position).Magnitude
+        if d < bestD then bestD = d; best = e.hrp; bestChar = e.root end
+    end
+    return best, bestChar
+end
+local function AvgEnemy()
+    local list = EnemyList(); if #list == 0 then return nil end
+    local sum = Vector3.zero; for _, e in ipairs(list) do sum = sum + e.hrp.Position end; return sum / #list
+end
+local function EnemyNames()
+    local out = {"Closest","Average"}
+    for _, e in ipairs(EnemyList(IsSameTeam)) do out[#out+1] = e.name end
+    return out
+end
+
+task.spawn(function() while true do if S.aimEnabled then
+    local nearest, targetHead = math.huge, nil
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character and p.Character:FindFirstChild("Head") then
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and not isTeammate(p) then
+                local head = p.Character.Head
+                local sp, on = Camera:WorldToViewportPoint(head.Position)
+                if on then
+                    local dist = (Vector2.new(sp.X,sp.Y) - Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)).Magnitude
+                    if dist < S.aimFOVRadius then
+                        local wd = (Camera.CFrame.Position - head.Position).Magnitude
+                        if wd < nearest then nearest = wd; targetHead = head end
+                    end
+                end
+            end
+        end
+    end
+    if targetHead then Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, targetHead.Position), S.aimSmoothness) end
+end; task.wait() end end)
+
+pcall(function()
+    local Util = require(game:GetService("ReplicatedStorage").Modules.Utility); local oldRay = Util.Raycast
+    Util.Raycast = function(self, origin, dir, dist, ...)
+        if not S.silentEnabled then return oldRay(self, origin, dir, dist, ...) end
+        if math.random(1,100) <= S.silentHitChance then
+            local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+            local best, bestD = nil, S.silentFOVRadius
+            for _, ent in ipairs(ColSvc:GetTagged("Entity")) do
+                if ent ~= LP.Character then
+                    local part = ent:FindFirstChild(S.silentHitPart, true)
+                    if part and part:IsA("BasePart") then
+                        local sp, on = Camera:WorldToViewportPoint(part.Position)
+                        if on then local d = (Vector2.new(sp.X,sp.Y)-center).Magnitude; if d < bestD then bestD=d; best=part end end
+                    end
+                end
+            end
+            if best then
+                local tp = best.Position; local dr = (tp-origin).Unit; local d2 = math.min((tp-origin).Magnitude, dist)
+                return {Position=origin+dr*d2, Distance=d2, Instance=best, Material=best.Material, Normal=-dr}
+            end
+        end
+        return oldRay(self, origin, dir, dist, ...)
+    end
+end)
+
+local function startVoid()
+    if S.voidActive then return end; S.voidActive = true
+    local char = LP.Character; if not char then return end
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    S.voidConn = RunService.Heartbeat:Connect(function()
+        if S.voidActive and hrp and hrp.Parent then
+            hrp.CFrame = CFrame.new(hrp.Position.X+500000, 999999, hrp.Position.Z+500000)
+        end
+    end)
+end
+local function stopVoid() S.voidActive = false; if S.voidConn then S.voidConn:Disconnect(); S.voidConn = nil end end
+
+local function orbGetTarget()
+    local me = MyHRP(); if not me then return nil end
+    if S.orbTarget == "Closest" then return ClosestEnemy() end
+    for _, e in ipairs(EnemyList()) do if e.name == S.orbTarget then return e.hrp end end
+    return nil
+end
+local function startOrbit()
+    if S.orbActive then return end; S.orbActive = true; S.orbAngle = 0
+    S.orbConn = RunService.Heartbeat:Connect(function()
+        if not S.orbActive then return end; local t = orbGetTarget(); if not t then return end
+        local char = LP.Character; if not char then return end
+        local myHrp = char:FindFirstChild("HumanoidRootPart"); if not myHrp then return end
+        S.orbAngle = S.orbAngle + (0.18 * S.orbSpeed); local a = S.orbAngle + math.rad(S.orbPhase); local pos
+        if S.orbStyle == "Circle" then pos = t.Position + Vector3.new(math.cos(a)*S.orbRadius, S.orbHeight, math.sin(a)*S.orbRadius)
+        elseif S.orbStyle == "Random" then local ang = math.random()*math.pi*2; local dist = math.random(2,S.orbRadius); pos = t.Position + Vector3.new(math.cos(ang)*dist, math.random(-1,3), math.sin(ang)*dist)
+        elseif S.orbStyle == "Teleport" then for i=1,8 do if not S.orbActive then break end; local ang = (i/8)*math.pi*2; myHrp.CFrame = CFrame.new(t.Position + Vector3.new(math.cos(ang)*S.orbRadius, S.orbHeight, math.sin(ang)*S.orbRadius)); task.wait(0.05/S.orbSpeed) end; pos = myHrp.Position
+        elseif S.orbStyle == "Figure 8" then pos = t.Position + Vector3.new(math.sin(a*2)*S.orbRadius, S.orbHeight, math.sin(a)*S.orbRadius)
+        elseif S.orbStyle == "Spiral" then local sr = 2 + (a % (math.pi*2)) * 0.1; if sr > S.orbRadius then sr = 2 end; pos = t.Position + Vector3.new(math.cos(a)*sr, S.orbHeight, math.sin(a)*sr)
+        elseif S.orbStyle == "Bounce" then pos = t.Position + Vector3.new(0, math.sin(a*2)*S.orbHeight, 0)
+        elseif S.orbStyle == "Orbit & Float" then pos = t.Position + Vector3.new(math.cos(a)*S.orbRadius, S.orbHeight+math.sin(a*2)*2, math.sin(a)*S.orbRadius)
+        else pos = t.Position + Vector3.new(math.cos(a)*S.orbRadius, S.orbHeight, math.sin(a)*S.orbRadius) end
+        if S.orbSemiStrafe and S.orbStyle ~= "Teleport" then pos = pos + Vector3.new(math.sin(a*3)*1.5, 0, 0) end
+        if S.orbStyle ~= "Teleport" then myHrp.CFrame = CFrame.new(pos, t.Position) end
+    end)
+end
+local function stopOrbit() S.orbActive = false; if S.orbConn then S.orbConn:Disconnect(); S.orbConn = nil end end
+
+local function applyAA()
+    if not S.aaEnabled or S.cfDesyncEnabled then return end; local char = LP.Character; if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
+    local pitch, yaw = 0, 0
+    if S.aaPitch == "Flip" then pitch = math.rad(180) elseif S.aaPitch == "Up" then pitch = math.rad(-90) elseif S.aaPitch == "Down" then pitch = math.rad(90) end
+    if S.aaSpin and MyHRP() then yaw = math.rad(math.random(-180,180))
+    elseif S.aaMode == "Jitter" then S.jitterAngle = (S.jitterAngle + S.aaSpeed * 0.01) % (S.aaYaw * 2); yaw = math.rad(S.jitterAngle - S.aaYaw)
+    elseif S.aaMode == "Sway" then yaw = math.sin(S.spinAngle * (S.aaSpeed / 5)) * math.rad(S.aaYaw)
+    elseif S.aaMode == "Inverter" then yaw = (math.floor(S.spinAngle * 2) % 2 == 0) and 0 or math.rad(180)
+    elseif S.aaMode == "Spin" then yaw = S.spinAngle end
+    hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(pitch, yaw, 0)
+end
+local function aaHB(dt) S.spinAngle = S.spinAngle + (S.aaSpeed * dt); applyAA() end
+local function startAA() if S.aaConn then S.aaConn:Disconnect() end; S.spinAngle = 0; S.jitterAngle = 0; S.aaConn = RunService.Heartbeat:Connect(aaHB) end
+local function stopAA() if S.aaConn then S.aaConn:Disconnect(); S.aaConn = nil end end
+
+local function arLoop() while S.arEnabled do
+    local char = LP.Character; if char then local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then local target, cd = nil, math.huge
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and not isTeammate(p) then
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then local enemyHrp = p.Character:FindFirstChild("HumanoidRootPart"); if enemyHrp then local dist = (hrp.Position - enemyHrp.Position).Magnitude
+                if dist < cd then cd = dist; target = p.Character end end end
+            end
+        end
+        if target then local tr = target.HumanoidRootPart
+            local bp = tr.Position - tr.CFrame.LookVector * S.arDist + Vector3.new(0, S.arHeight, 0)
+            TweenService:Create(hrp, TweenInfo.new(S.arRate, Enum.EasingStyle.Linear), {CFrame = CFrame.new(bp)}):Play()
+        end
+    end end; task.wait(S.arRate)
+end end
+
+local function StartAC()
+    if S.acConn then S.acConn:Disconnect() end
+    S.acConn = RunService.Heartbeat:Connect(function()
+        if not S.acEnabled then return end; local hrp = MyHRP(); if not hrp then return end
+        for _, e in ipairs(EnemyList()) do
+            local dist = (hrp.Position - e.hrp.Position).Magnitude
+            if dist < 20 then hrp.CFrame = hrp.CFrame + hrp.CFrame.LookVector * 60 + Vector3.new(0, 30, 0); break end
+        end
+    end)
+end
+local function StopAC() if S.acConn then S.acConn:Disconnect(); S.acConn = nil end end
+
+local function StartFakeLag()
+    if S.fakeLagConn then S.fakeLagConn:Disconnect() end
+    local lagState, lastToggle = false, tick()
+    S.fakeLagConn = RunService.Heartbeat:Connect(function()
+        if not S.fakeLagEnabled then return end
+        local now = tick(); local delay = S.fakeLagAmount / 1000
+        if now - lastToggle >= delay then
+            lastToggle = now; lagState = not lagState
+            local hrp = MyHRP()
+            if hrp then hrp.Anchored = lagState end
+        end
+    end)
+end
+local function StopFakeLag()
+    if S.fakeLagConn then S.fakeLagConn:Disconnect(); S.fakeLagConn = nil end
+    local hrp = MyHRP(); if hrp then hrp.Anchored = false end
+end
+
+local function StartCFDesync()
+    if S.cfDesyncRenderConn then return end
+    if S.aaEnabled then S.aaEnabled = false; stopAA() end
+
+    S.cfDesyncRenderConn = RunService.RenderStepped:Connect(function()
+        local hrp = MyHRP()
+        if S.cfDesyncEnabled and hrp then
+            local offset = S.cfDesyncIntensity
+            hrp.CFrame = hrp.CFrame * CFrame.new(math.random(-offset,offset), math.random(-offset,offset), math.random(-offset,offset)) * CFrame.Angles(math.rad(math.random(-90,90)), math.rad(math.random(-180,180)), 0)
+        end
+    end)
+end
+local function StopCFDesync()
+    if S.cfDesyncRenderConn then S.cfDesyncRenderConn:Disconnect(); S.cfDesyncRenderConn = nil end
+end
+
+local function StartResolver()
+    if S.resolverConn then S.resolverConn:Disconnect() end
+    S.resolverConn = RunService.Heartbeat:Connect(function()
+        if not S.resolverEnabled then return end
+        local hrp = MyHRP(); if not hrp then return end
+        local i = S.resolverIntensity * 10
+        hrp.AssemblyLinearVelocity = Vector3.new(math.random(-i,i), math.random(-i,i), math.random(-i,i))
+        hrp.AssemblyAngularVelocity = Vector3.new(math.random(-i,i), math.random(-i,i), math.random(-i,i))
+    end)
+end
+local function StopResolver()
+    if S.resolverConn then S.resolverConn:Disconnect(); S.resolverConn = nil end
+end
+
+local function doRF() task.spawn(function() if S._rfBusy then return end; S._rfBusy=true; local gc=getgc and getgc(true) or {}; local n=0; for _,obj in ipairs(gc) do n=n+1; if n%150==0 then task.wait() end; if type(obj)=="table" and rawget(obj,"ShootCooldown") and rawget(obj,"ShootDamage") then obj.ShootCooldown=0.001; obj.ShootDamage=9999 end end; S._rfBusy=nil end) end
+local function doMB() task.spawn(function() if S._mbBusy then return end; S._mbBusy=true; local gc=getgc and getgc(true) or {}; local n=0; for _,obj in ipairs(gc) do n=n+1; if n%150==0 then task.wait() end; if type(obj)=="table" and rawget(obj,"ShootCooldown")==nil then local keys={"SwingCooldown","MeleeCooldown","Cooldown","SwingSpeed","AttackCooldown"}; for _,k in ipairs(keys) do if rawget(obj,k)~=nil and type(obj[k])=="number" then obj[k]=(k=="SwingSpeed") and 9999 or 0.001 end end end end; S._mbBusy=nil end) end
+local function doFR() task.spawn(function() if S._frBusy then return end; S._frBusy=true; local gc=getgc and getgc(true) or {}; local n=0; for _,obj in ipairs(gc) do n=n+1; if n%150==0 then task.wait() end; if type(obj)=="table" then local keys={"ReloadLength","ReloadTime","FireRate","Cooldown","AttackCooldown","SwingCooldown","ThrowCooldown","RecoverTime","WindupTime","ShootCooldown"}; for _,k in ipairs(keys) do if rawget(obj,k)~=nil and type(obj[k])=="number" then obj[k]=(k=="ReloadLength") and 0.05 or 0 end end end end; S._frBusy=nil end) end
+
+local crossLines = {}
+local function drawCrosshair()
+    local c = Camera.ViewportSize / 2; local cs, ct, cg = S.crossSize, S.crossThick, S.crossGap
+    local clr = S.crossColor; local spin = S.crossSpin and (tick()*S.crossSpinSpeed*90)%360 or 0
+    local cosR, sinR = math.cos(math.rad(spin)), math.sin(math.rad(spin))
+    local function rot(v) return Vector2.new(v.X*cosR - v.Y*sinR, v.X*sinR + v.Y*cosR) end
+    local lines = {
+        {c+rot(Vector2.new(0,cg+cs)), c+rot(Vector2.new(0,cg))},
+        {c+rot(Vector2.new(0,-cg-cs)), c+rot(Vector2.new(0,-cg))},
+        {c+rot(Vector2.new(cg+cs,0)), c+rot(Vector2.new(cg,0))},
+        {c+rot(Vector2.new(-cg-cs,0)), c+rot(Vector2.new(-cg,0))},
+    }
+    for i=1,4 do
+        if not crossLines[i] then local ok,d=pcall(Drawing.new,"Line"); crossLines[i]=ok and d or nil end
+    end
+    for i=1,4 do local l=crossLines[i]; if l then l.Visible=S.crossEnabled; l.From=lines[i][1]; l.To=lines[i][2]; l.Color=clr; l.Thickness=ct end end
+end
+local function StartCrosshair() if S.crossConn then S.crossConn:Disconnect() end; S.crossConn=RunService.RenderStepped:Connect(drawCrosshair) end
+local function StopCrosshair() if S.crossConn then S.crossConn:Disconnect(); S.crossConn=nil end; for i=1,4 do if crossLines[i] then crossLines[i].Visible=false end end end
+
+local function checkTriggerbot()
+    if not S.tgEnabled then return end; local now=tick(); if now-S.tgLast<S.tgDelay then return end
+    local uis=game:GetService("UserInputService")
+    if S.tgKey=="MouseButton2" and not uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+    if S.tgKey~="MouseButton2" and not uis:IsKeyDown(Enum.KeyCode[S.tgKey]) then return end
+    local cam=Camera; local target, bestD = nil, 50
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=LP and p.Character and p.Character:FindFirstChild("Head") and not isTeammate(p) then
+            local hum=p.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health>0 then
+                local sp,on=cam:WorldToViewportPoint(p.Character.Head.Position)
+                if on then local d=(Vector2.new(sp.X,sp.Y)-cam.ViewportSize/2).Magnitude; if d<bestD then target=p; bestD=d end end
+            end
+        end
+    end
+    if target then S.tgLast=now; pcall(function() task.spawn(function() local tool=LP.Character and LP.Character:FindFirstChildOfClass("Tool"); if tool and tool:FindFirstChild("Handle") then tool:Activate() end end) end) end
+end
+local function StartTriggerbot() if S.tgConn then S.tgConn:Disconnect() end; S.tgConn=RunService.Heartbeat:Connect(checkTriggerbot) end
+local function StopTriggerbot() if S.tgConn then S.tgConn:Disconnect(); S.tgConn=nil end end
+
+local function applyMovementMods()
+    local char=LP.Character; if not char then return end; local hum=char:FindFirstChildOfClass("Humanoid"); if not hum then return end
+    if S.wsEnabled then hum.WalkSpeed=S.walkSpeed end
+    if S.jpEnabled then hum.JumpPower=S.jumpPower end
+    if S.gvEnabled then workspace.Gravity=S.gravity end
+end
+local function StartMovementMods() if S.mmConn then S.mmConn:Disconnect() end; S.mmConn=RunService.Heartbeat:Connect(applyMovementMods) end
+local function StopMovementMods()
+    if S.mmConn then S.mmConn:Disconnect(); S.mmConn=nil end
+    local char=LP.Character; if char then local hum=char:FindFirstChildOfClass("Humanoid"); if hum then hum.WalkSpeed=16; hum.JumpPower=50 end end
+    workspace.Gravity=196.2
+end
+
+local function extendHitboxes()
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=LP and not isTeammate(p) and p.Character then
+            for _,part in ipairs(p.Character:GetChildren()) do
+                if part:IsA("BasePart") and part.Name~="HumanoidRootPart" then
+                    local orig=part.Size; local target=orig*S.hbSize
+                    if (target-orig).Magnitude>0.01 then part.Size=target end
+                end
+            end
+        end
+    end
+end
+local function resetHitboxes()
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p.Character then for _,part in ipairs(p.Character:GetChildren()) do if part:IsA("BasePart") and part:FindFirstChild("OriginalSize")==nil then end end end
+    end
+end
+local function StartHitbox() if S.hbConn then S.hbConn:Disconnect() end; S.hbConn=RunService.Heartbeat:Connect(extendHitboxes) end
+local function StopHitbox() if S.hbConn then S.hbConn:Disconnect(); S.hbConn=nil end end
+
+local function StartRemovables()
+    if S.rmvConn then S.rmvConn:Disconnect() end
+    S.rmvConn = RunService.RenderStepped:Connect(function()
+        local char = LP.Character; if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        if S.noShootAnim then
+            for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+                if track.Animation and track.Animation.AnimationId:find("Shoot") then track:Stop() end
+            end
+        end
+
+        if S.noSprintAnim then
+            for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+                if track.Animation and track.Animation.AnimationId:find("Sprint") then track:Stop() end
+            end
+        end
+
+        if S.noMotion then
+            if hum.CameraOffset then hum.CameraOffset = Vector3.zero end
+        end
+    end)
+
+    if S.noCamShake then
+        pcall(function()
+            local camShake = Camera:FindFirstChildOfClass("CameraShakeInstance") or Camera:FindFirstChild("CameraShake")
+            if camShake then camShake.Enabled = false end
+        end)
+    end
+end
+local function StopRemovables()
+    if S.rmvConn then S.rmvConn:Disconnect(); S.rmvConn=nil end
+    S.noShootAnim=false; S.noSprintAnim=false; S.noEquipAnim=false; S.noReloadAnim=false
+    S.noMotion=false; S.noCamShake=false; S.noCamSway=false
+end
+
+local function StartNoFlashbang()
+    pcall(function()
+        local RepStorage = game:GetService("ReplicatedStorage")
+        local remotes = RepStorage:FindFirstChild("Remotes")
+        if not remotes then return end
+        local rep = remotes:FindFirstChild("Replication")
+        if rep then
+
+            for _, remote in ipairs(rep:GetChildren()) do
+                if remote:IsA("RemoteEvent") and remote.Name:lower():find("effect") then
+                    local oldFire; oldFire = hookfunction(remote.FireServer, function(s,...)
+                        local a={...}; if #a>=2 and type(a[2])=="string" and (a[2]:find("Blind") or a[2]:find("Flash")) then return end
+                        return oldFire(s,...)
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+local function StartThirdPerson()
+    if S.tpCamConn then S.tpCamConn:Disconnect() end
+    S.tpCamConn = RunService.RenderStepped:Connect(function()
+        if not S.thirdPerson then return end
+        pcall(function()
+            if Camera.CameraType == Enum.CameraType.Track then
+                Camera.CameraType = Enum.CameraType.Custom
+            end
+            local char = LP.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    pcall(function() hum.CameraOffset = Vector3.new(2,0,0) end)
+                end
+            end
+        end)
+    end)
+end
+local function StopThirdPerson()
+    if S.tpCamConn then S.tpCamConn:Disconnect(); S.tpCamConn=nil end
+    Camera.CameraType = Enum.CameraType.Custom
+end
+
+local function StartChams()
+    if S.chamsConn then S.chamsConn:Disconnect() end
+    S.chamsAdornments = {}
+    S.chamsConn = RunService.RenderStepped:Connect(function()
+        if not S.chamsEnabled then return end
+        local hue = (os.clock() * 0.5) % 1
+        local col = S.chamsGlow and Color3.fromHSV(hue, 1, 1) or S.chamsColor
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p == LP then continue end
+            local char = p.Character; if not char then continue end
+            if isTeammate(p) then continue end
+
+            if not char:FindFirstChild("MehfilCham") then
+                local highlight = Instance.new("Highlight")
+                highlight.Name = "MehfilCham"; highlight.Adornee = char
+                highlight.FillColor = col; highlight.OutlineColor = col
+                highlight.FillTransparency = S.chamsTransparency; highlight.OutlineTransparency = 0
+                highlight.Parent = char
+                S.chamsAdornments[p] = highlight
+            else
+                local h = char:FindFirstChild("MehfilCham")
+                if h then
+                    h.FillColor = col; h.OutlineColor = col
+                    h.FillTransparency = S.chamsTransparency
+                end
+            end
+        end
+
+        for p, h in pairs(S.chamsAdornments) do
+            if not p.Character or not p.Character:FindFirstChild("MehfilCham") then
+                if h and h.Parent then h:Destroy() end
+                S.chamsAdornments[p] = nil
+            end
+        end
+    end)
+end
+local function StopChams()
+    if S.chamsConn then S.chamsConn:Disconnect(); S.chamsConn=nil end
+    for _, h in pairs(S.chamsAdornments) do if h and h.Parent then h:Destroy() end end
+    S.chamsAdornments = {}
+end
+
+local wmText
+local function updateWatermark()
+    if not S.wmEnabled then if wmText then wmText.Visible=false end; return end
+    if not wmText then local ok,d=pcall(Drawing.new,"Text"); wmText=ok and d or nil; if wmText then wmText.Position=Vector2.new(10,10); wmText.Size=14; wmText.Color=Color3.new(1,1,1); wmText.Center=false; wmText.Outline=true; wmText.OutlineColor=Color3.new(0,0,0); wmText.Font=2 end end
+    if wmText then wmText.Visible=true; wmText.Text=string.format("mehfil | FPS: %d | Ping: %d", math.floor(1/(task.wait()*0+1/60)), 0) end
+end
+local wmFps, wmLast = 0, tick()
+RunService.RenderStepped:Connect(function(dt)
+    if not S.wmEnabled then if wmText then wmText.Visible=false end; return end
+    wmFps=wmFps+1; if tick()-wmLast>=1 then local fps=math.floor(wmFps/(tick()-wmLast)); if wmText then wmText.Text=string.format("mehfil | FPS: %d",fps) end; wmFps=0; wmLast=tick() end
+end)
+
+local function tpGetTarget()
+    if S.tpTarget=="Closest" then return ClosestEnemy()
+    elseif S.tpTarget=="Average" then local avg=AvgEnemy(); if avg then return {Position=avg} end; return ClosestEnemy()
+    else for _,e in ipairs(EnemyList()) do if e.name==S.tpTarget then return e.hrp end end; return nil end
+end
+local function StartTP()
+    if S.tpActive then return end; S.tpActive=true; S.cycLast=tick()
+    if (S.tpMethod=="Void Randomizer" or S.tpMethod=="Void Extreme") and S.cycVoid>0 and S.cycEnemy>0 and not S.cycNtf then pcall(function() Library:Notify("Cycle active: alternates between Void Randomizer and Void Extreme") end); S.cycNtf=true end
+    S.tpConn = RunService.Heartbeat:Connect(function()
+        if not S.tpActive then return end; local me=MyHRP(); if not me then return end; local now=tick()
+        if S.autoOpp then S.tpTarget="Closest"; S.orbTarget="Closest"
+            if not S.autoOppNtf then pcall(function() Library:Notify("Auto Opponent ON: target=Closest") end); S.autoOppNtf=true end
+        end
+        local epm; if S.tpMethod=="Void Randomizer" then epm="Void Extreme" elseif S.tpMethod=="Void Extreme" then epm="Void Randomizer" else epm=S.tpMethod end
+        local em=S.tpMethod
+        if S.cycVoid>0 and S.cycEnemy>0 then
+            local pd = (S.cycPhase=="void") and S.cycVoid or S.cycEnemy
+            if (now-S.cycLast)>=pd then S.cycLast=now; S.cycPhase=(S.cycPhase=="void") and "enemy" or "void" end
+            em=(S.cycPhase=="void") and S.tpMethod or epm
+        end
+        local isVoid=(em=="Void Randomizer" or em=="Void Extreme")
+        if (now-S.tpLast)<(isVoid and 0 or S.tpSpamRate) then return end; S.tpLast=now
+        local cf
+        if em=="Void Randomizer" then cf=CFrame.new(TP_VoidRandomizer())
+        elseif em=="Void Extreme" then cf=CFrame.new(TP_VoidExtreme())
+        else local t=tpGetTarget(); if not t then return end
+            local pos=TP_ComputePos(t, S.tpMethod, S.tpMinDist, S.tpMaxDist, S.dXp, S.dXm, S.dYp, S.dYm, S.dZp, S.dZm)
+            cf=CFrame.new(pos, (typeof(t)=="Instance") and t.Position or (pos+Vector3.new(0,0,-1)))
+        end
+        TP_SafeTeleport(me, cf)
+    end)
+end
+local function StopTP() S.tpActive=false; if S.tpConn then S.tpConn:Disconnect(); S.tpConn=nil end end
+
+local function StartFP()
+    if S.fpConn then return end
+    S.fpConn = RunService.Heartbeat:Connect(function()
+        local hrp = MyHRP(); if S.fpEnabled and hrp then S.fpRealCF = hrp.CFrame; hrp.CFrame = S.fpRealCF + Vector3.new(math.random(-150,150), math.random(10,100), math.random(-150,150)) end
+    end)
+    S.fpRenderConn = RunService.RenderStepped:Connect(function()
+        local hrp = MyHRP(); if S.fpEnabled and hrp and S.fpRealCF then hrp.CFrame = S.fpRealCF end
+    end)
+end
+local function StopFP() if S.fpConn then S.fpConn:Disconnect(); S.fpConn=nil end; if S.fpRenderConn then S.fpRenderConn:Disconnect(); S.fpRenderConn=nil end end
+
+local function StartDS()
+    if S.dsConn then return end
+    S.dsConn = RunService.Heartbeat:Connect(function()
+        local hrp = MyHRP(); if S.dsEnabled and hrp then S.dsRealVel = hrp.AssemblyLinearVelocity; hrp.AssemblyLinearVelocity = Vector3.new(math.random(-5000,5000), math.random(-5000,5000), math.random(-5000,5000)) end
+    end)
+    S.dsRenderConn = RunService.RenderStepped:Connect(function()
+        local hrp = MyHRP(); if S.dsEnabled and hrp and S.dsRealVel then hrp.AssemblyLinearVelocity = S.dsRealVel end
+    end)
+end
+local function StopDS() if S.dsConn then S.dsConn:Disconnect(); S.dsConn=nil end; if S.dsRenderConn then S.dsRenderConn:Disconnect(); S.dsRenderConn=nil end end
+
+local function StartBlink()
+    if S.blConn then S.blConn:Disconnect() end
+    if MyHRP() then S.blAnchor = MyHRP().Position end
+    local lastSnap, anchorT, seed = 0, 0, math.random(1e3, 9e3)
+    S.blConn = RunService.Heartbeat:Connect(function(dt)
+        if not S.blEnabled or not MyHRP() then return end
+        anchorT = anchorT + dt
+        S.blAnchor = (S.blAnchor or MyHRP().Position) + Vector3.new(math.sin(anchorT * 1.3 + seed) * 12, math.sin(anchorT * 2.1) * 3, math.cos(anchorT * 1.7 + seed) * 12) * dt
+        local now = tick()
+        if (now - lastSnap) >= (1 / math.max(S.blRate, 1)) then
+            lastSnap = now; local a = math.random() * math.pi * 2; local d = math.random() * S.blRadius
+            local hrp = MyHRP()
+            if hrp then TP_SafeTeleport(hrp, CFrame.new(S.blAnchor.X + math.cos(a) * d, S.blAnchor.Y + (math.random() - 0.5) * S.blRadius * 0.3, S.blAnchor.Z + math.sin(a) * d)) end
+        end
+    end)
+end
+local function StopBlink() if S.blConn then S.blConn:Disconnect(); S.blConn = nil end end
+
+local function StartEvasion()
+    if S.evConn then S.evConn:Disconnect() end
+    local t0, s1, s2, s3 = tick(), math.random(1e3,9e3), math.random(1e3,9e3), math.random(1e3,9e3)
+    S.evConn = RunService.Heartbeat:Connect(function()
+        if not S.evEnabled or not MyHRP() then return end
+        local t, i = tick() - t0, S.evIntensity
+        local r1, r2, r3 = 500 * 0.18 * i, 500 * 0.35 * i, 500 * 0.55 * i
+        local oX = math.cos(t * 18.7) * r1 + math.cos(t * 7.3 + s1) * r2 + math.cos(t * 2.1 + s2) * r3
+        local oZ = math.sin(t * 18.7) * r1 + math.sin(t * 7.3 + s1) * r2 + math.sin(t * 2.1 + s2) * r3
+        local oY = math.sin(t * 11.3 + s3) * 500 * 0.12 * i + math.sin(t * 5.7) * 500 * 0.08 * i
+        TP_SafeTeleport(MyHRP(), CFrame.new(MyHRP().Position + Vector3.new(oX, oY, oZ)))
+    end)
+end
+local function StopEvasion() if S.evConn then S.evConn:Disconnect(); S.evConn = nil end end
+
+local function StartFly()
+    if S.flyConn then S.flyConn:Disconnect() end
+    S.flyConn = RunService.Heartbeat:Connect(function(dt)
+        if not S.flyEnabled or not MyHRP() then return end
+        local hum=LP.Character and LP.Character:FindFirstChildOfClass("Humanoid"); if hum then hum:ChangeState(Enum.HumanoidStateType.Physics) end
+        local md=Vector3.zero
+        if hum and hum.MoveDirection.Magnitude>0 then local fl=Vector3.new(Camera.CFrame.LookVector.X,0,Camera.CFrame.LookVector.Z); md=fl.Magnitude>0.001 and Vector3.new(hum.MoveDirection.X, Camera.CFrame.LookVector.Y*hum.MoveDirection:Dot(fl.Unit), hum.MoveDirection.Z) or Vector3.new(hum.MoveDirection.X, Camera.CFrame.LookVector.Y, hum.MoveDirection.Z) end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then md=md+Vector3.new(0,1,0) end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then md=md-Vector3.new(0,1,0) end
+        local hrp=MyHRP(); hrp.AssemblyLinearVelocity=Vector3.zero; hrp.AssemblyAngularVelocity=Vector3.zero
+        if md.Magnitude>0 then hrp.CFrame=hrp.CFrame+(md.Unit*(S.flySpeed*dt)) end
+    end)
+end
+local function StopFly()
+    if S.flyConn then S.flyConn:Disconnect(); S.flyConn=nil end
+    local hrp=MyHRP(); if hrp then hrp.AssemblyLinearVelocity=Vector3.zero; hrp.AssemblyAngularVelocity=Vector3.zero end
+    local hum=LP.Character and LP.Character:FindFirstChildOfClass("Humanoid"); if hum then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+end
+
+RunService.Stepped:Connect(function()
+    if not S.ncEnabled or not LP.Character then return end; S.ncFrames=S.ncFrames+1; if S.ncFrames%2~=0 then return end
+    for _,p in ipairs(LP.Character:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide=false end end
+end)
+UIS.JumpRequest:Connect(function()
+    if S.djEnabled then local hum=LP.Character and LP.Character:FindFirstChildOfClass("Humanoid"); if hum and hum:GetState()~=Enum.HumanoidStateType.Dead then hum:ChangeState(Enum.HumanoidStateType.Jumping) end end
+end)
+
+local function MakeTracer(sPos, ePos)
+    if not S.trEnabled then return end
+    local a0=Instance.new("Attachment"); a0.Parent=workspace.Terrain; local a1=Instance.new("Attachment"); a1.Parent=workspace.Terrain
+    local beam=Instance.new("Beam"); beam.Attachment0=a0; beam.Attachment1=a1; beam.Color=ColorSequence.new(S.trColor)
+    local bw=(S.trStyle=="Laser") and 0.02 or 0.15; beam.Width0=bw*S.trSize; beam.Width1=bw*S.trSize
+    beam.FaceCamera=false; beam.LightEmission=S.trGlow; beam.LightInfluence=1-S.trGlow
+    if S.trTextures[S.trStyle] then beam.Texture=S.trTextures[S.trStyle]; beam.TextureLength=4; beam.TextureSpeed=1 else beam.Texture="" end
+    beam.Parent=workspace.Terrain; a0.WorldPosition=sPos; a1.WorldPosition=ePos
+    table.insert(S.trActiveTracers, {Beam=beam, A0=a0, A1=a1, Created=tick(), Lifetime=S.trDuration, FadeStart=tick()+S.trDuration-S.trFadeTime})
+end
+task.spawn(function() while S.trCleanup do local now=tick()
+    for i=#S.trActiveTracers,1,-1 do local tr=S.trActiveTracers[i]
+        if not tr or now-tr.Created>=tr.Lifetime then if tr then pcall(function() tr.Beam:Destroy() end); pcall(function() tr.A0:Destroy() end); pcall(function() tr.A1:Destroy() end) end; table.remove(S.trActiveTracers,i)
+        else local age=now-tr.Created; if age>=tr.FadeStart then local fp=math.clamp((age-tr.FadeStart)/S.trFadeTime,0,1); pcall(function() tr.Beam.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,fp),NumberSequenceKeypoint.new(1,1)}) end) end end
+    end; task.wait(0.1) end end)
+local function StopTracers() S.trCleanup=false; for _,tr in ipairs(S.trActiveTracers) do pcall(function() tr.Beam:Destroy() end); pcall(function() tr.A0:Destroy() end); pcall(function() tr.A1:Destroy() end) end; S.trActiveTracers={} end
+UIS.InputBegan:Connect(function(i,gp) if gp then return end; if i.UserInputType==Enum.UserInputType.MouseButton1 then local tool=LP.Character and LP.Character:FindFirstChildOfClass("Tool"); if tool and S.trEnabled then local mp=Camera.CFrame.Position+Camera.CFrame.LookVector*1.5; local ep=Camera.CFrame.Position+Camera.CFrame.LookVector*1000; local params=RaycastParams.new(); params.FilterDescendantsInstances={LP.Character}; params.FilterType=Enum.RaycastFilterType.Blacklist; local res=workspace:Raycast(mp,(ep-mp).Unit*1000,params); if res then ep=res.Position end; MakeTracer(mp,ep) end end end)
+
+S.hsConn = RunService.RenderStepped:Connect(function()
+    if not S.hsEnabled then return end; local now=tick(); if now-S.hsLastCheck<0.05 then return end; S.hsLastCheck=now
+    for _,e in ipairs(EnemyList()) do local hum=e.root:FindFirstChildOfClass("Humanoid")
+        if hum then local lh=S.hsTargetHP[e.root] or hum.Health
+            if hum.Health<lh then local id=S.hsAssets[S.hsStyle]
+                if id then local snd=Instance.new("Sound"); snd.SoundId=id; snd.Volume=S.hsVolume; snd.Pitch=S.hsPitch; snd.Parent=workspace.Terrain; snd:Play(); Debris:AddItem(snd,3) end
+            end; S.hsTargetHP[e.root]=hum.Health
+        end
+    end
+end)
+
+local wbName = "MehfilWB"
+local function HandleWB()
+    if not S.wbEnabled then return end; local _,ec=ClosestEnemy(); if not ec then return end
+    local head=ec:FindFirstChild("Head"); if not head then return end
+    Camera.CFrame=CFrame.lookAt(Camera.CFrame.Position, head.Position)
+    local tool=LP.Character and LP.Character:FindFirstChildOfClass("Tool"); if tool then tool:Activate() end
+    if tick()-S.wbLastShot>0.05 then S.wbLastShot=tick(); pcall(function() game:GetService("VirtualUser"):ClickButton1(Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)) end) end
+end
+local function StartWB() pcall(function() RunService:UnbindFromRenderStep(wbName) end); RunService:BindToRenderStep(wbName, Enum.RenderPriority.Camera.Value+1, HandleWB) end
+local function StopWB() pcall(function() RunService:UnbindFromRenderStep(wbName) end) end
+
+task.wait()
+
+local fovGui = Instance.new("ScreenGui"); fovGui.Name="FOVGui"; fovGui.DisplayOrder=10; fovGui.ResetOnSpawn=false; fovGui.IgnoreGuiInset=true; fovGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; fovGui.Parent=(gethui and pcall(gethui) and gethui()) or CoreGui; S.fovGui=fovGui
+local function buildfov(name, cfg)
+    local c=Instance.new("Frame"); c.Name=name; c.BackgroundTransparency=1; c.BorderSizePixel=0; c.Visible=false; c.Parent=fovGui
+    local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,1,0); f.BackgroundColor3=Color3.new(1,1,1); f.BackgroundTransparency=cfg.FilledTransparency; f.BorderSizePixel=0; f.Visible=false; f.ZIndex=1; f.Parent=c
+    Instance.new("UICorner",f).CornerRadius=UDim.new(1,0)
+    local fg=Instance.new("UIGradient"); fg.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.FilledColor1),ColorSequenceKeypoint.new(1,cfg.FilledColor2)}); fg.Rotation=cfg.FilledRotation; fg.Parent=f
+    local o=Instance.new("Frame"); o.Size=UDim2.new(1,0,1,0); o.BackgroundTransparency=1; o.BorderSizePixel=0; o.ZIndex=2; o.Parent=c
+    Instance.new("UICorner",o).CornerRadius=UDim.new(1,0)
+    local s=Instance.new("UIStroke"); s.Color=Color3.new(1,1,1); s.Thickness=cfg.OutlineThickness; s.Transparency=cfg.OutlineTransparency; s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=o
+    local sg=Instance.new("UIGradient"); sg.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.OutlineColor1),ColorSequenceKeypoint.new(1,cfg.OutlineColor2)}); sg.Rotation=cfg.OutlineRotation; sg.Parent=s
+    return {container=c,fill=f,fillgrad=fg,stroke=s,strokegrad=sg}
+end
+local aF=buildfov("AimbotFOV", S.aimFOVCfg); S.aimFOVContainer=aF.container; S.aimFOVFill=aF.fill; S.aimFOVFillGrad=aF.fillgrad; S.aimFOVStroke=aF.stroke; S.aimFOVStrokeGrad=aF.strokegrad
+local sF=buildfov("SilentFOV", S.silentFOVCfg); S.silFOVContainer=sF.container; S.silFOVFill=sF.fill; S.silFOVFillGrad=sF.fillgrad; S.silFOVStroke=sF.stroke; S.silFOVStrokeGrad=sF.strokegrad
+
+local function screenCenter() return Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2) end
+local function GetBestTargetScreenPos()
+    local best, bestD = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character and p.Character:FindFirstChild("Head") then
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and not isTeammate(p) then
+                local hd = p.Character.Head
+                local sp, on = Camera:WorldToViewportPoint(hd.Position)
+                if on then
+                    local dx = sp.X - Camera.ViewportSize.X * 0.5
+                    local dy = sp.Y - Camera.ViewportSize.Y * 0.5
+                    local d = dx*dx + dy*dy
+                    if d < bestD then bestD = d; best = Vector2.new(sp.X, sp.Y) end
+                end
+            end
+        end
+    end
+    return best
+end
+local function aimbotfovcenter()
+    if S.aimFollowTarget then local s = GetBestTargetScreenPos(); if s then return s end end
+    return screenCenter()
+end
+local function silentfovcenter()
+    if S.silentFollowTarget then local s = GetBestTargetScreenPos(); if s then return s end end
+    return screenCenter()
+end
+if S.fovRenderConn then S.fovRenderConn:Disconnect() end
+S.fovRenderConn = RunService.RenderStepped:Connect(function()
+    local cx,cy = Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2
+
+    local va = S.aimShowFOV and S.aimEnabled
+    if S.aimFOVContainer then S.aimFOVContainer.Visible = va; S.aimFOVFill.Visible = va and S.aimFOVCfg.FilledEnabled end
+    if va then
+        local c = aimbotfovcenter() or Vector2.new(cx,cy); local r = S.aimFOVRadius
+        S.aimFOVContainer.Size = UDim2.fromOffset(r*2, r*2)
+        if S.aimFollowTarget and S.aimFollowSmoothness > 0 then
+            local alpha = math.clamp(1 / math.max(S.aimFollowSmoothness * 10, 1), 0, 1)
+            if not S.aimFOVSmoothInit then S.aimFOVSmoothPos = c; S.aimFOVSmoothInit = true end
+            S.aimFOVSmoothPos = S.aimFOVSmoothPos:Lerp(c, alpha)
+            S.aimFOVContainer.Position = UDim2.fromOffset(S.aimFOVSmoothPos.X - r, S.aimFOVSmoothPos.Y - r)
+        else
+            S.aimFOVSmoothInit = false
+            S.aimFOVContainer.Position = UDim2.fromOffset(c.X - r, c.Y - r)
+        end
+        local cfg = S.aimFOVCfg
+        if cfg.FilledAnimated then
+            S.aimFOVFillGrad.Rotation = math.sin(tick()*cfg.FilledSpeed)*180 + cfg.FilledRotation
+        elseif cfg.SpinOn then
+            S.aimFOVFillGrad.Rotation = cfg.FilledRotation + (tick()*cfg.SpinSpd*90)%360
+        end
+        if cfg.SpinOn then
+            S.aimFOVStrokeGrad.Rotation = cfg.OutlineRotation + (tick()*cfg.SpinSpd*90)%360
+        end
+    end
+
+    local vs = S.silentShowFOV and S.silentEnabled
+    if S.silFOVContainer then S.silFOVContainer.Visible = vs; S.silFOVFill.Visible = vs and S.silentFOVCfg.FilledEnabled end
+    if vs then
+        local c = silentfovcenter() or Vector2.new(cx,cy); local r = S.silentFOVRadius
+        S.silFOVContainer.Size = UDim2.fromOffset(r*2, r*2)
+        if S.silentFollowTarget and S.silentFollowSmoothness > 0 then
+            local alpha = math.clamp(1 / math.max(S.silentFollowSmoothness * 10, 1), 0, 1)
+            if not S.silFOVSmoothInit then S.silFOVSmoothPos = c; S.silFOVSmoothInit = true end
+            S.silFOVSmoothPos = S.silFOVSmoothPos:Lerp(c, alpha)
+            S.silFOVContainer.Position = UDim2.fromOffset(S.silFOVSmoothPos.X - r, S.silFOVSmoothPos.Y - r)
+        else
+            S.silFOVSmoothInit = false
+            S.silFOVContainer.Position = UDim2.fromOffset(c.X - r, c.Y - r)
+        end
+        local cfg = S.silentFOVCfg
+        if cfg.FilledAnimated then
+            S.silFOVFillGrad.Rotation = math.sin(tick()*cfg.FilledSpeed)*180 + cfg.FilledRotation
+        elseif cfg.SpinOn then
+            S.silFOVFillGrad.Rotation = cfg.FilledRotation + (tick()*cfg.SpinSpd*90)%360
+        end
+        if cfg.SpinOn then
+            S.silFOVStrokeGrad.Rotation = cfg.OutlineRotation + (tick()*cfg.SpinSpd*90)%360
+        end
+    end
+end)
+
+if UIS.TouchEnabled and not UIS.MouseEnabled then
+    local tg=Instance.new("ScreenGui"); tg.Name="ToggleGui"; tg.ResetOnSpawn=false; tg.DisplayOrder=999; tg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; tg.Parent=CoreGui
+    local mb=Instance.new("TextButton"); mb.Name="MehfilBtn"; mb.Size=UDim2.new(0,64,0,28); mb.AnchorPoint=Vector2.new(1,0); mb.Position=UDim2.new(1,-12,0,12); mb.BackgroundColor3=Color3.fromRGB(20,20,20); mb.BorderSizePixel=0; mb.TextColor3=Color3.new(1,1,1); mb.TextSize=12; mb.Font=Enum.Font.GothamBold; mb.Text="OPEN"; mb.Parent=tg
+    Instance.new("UICorner",mb).CornerRadius=UDim.new(0,6); local st=Instance.new("UIStroke",mb); st.Color=Color3.fromRGB(0,85,255); st.Thickness=1
+    local dr,ds,sp=false,nil,nil
+    mb.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then dr=true; ds=i.Position; sp=mb.Position end end)
+    mb.InputChanged:Connect(function(i) if dr and (i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseMovement) then local d=i.Position-ds; mb.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y) end end)
+    mb.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then dr=false end end)
+    local function ub() if Library and Library.Toggled~=nil then mb.Text=Library.Toggled and "CLOSED" or "OPEN" else mb.Text="OPEN" end end
+    mb.MouseButton1Click:Connect(function() if Library and Library.Toggle then pcall(Library.Toggle,Library); task.wait(); ub() end end)
+    if Library and Library.OnToggle then Library:OnToggle(ub) end; ub()
+end
+
+ThemeManager:SetLibrary(Library); SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings(); SaveManager:SetIgnoreIndexes({"MenuKeybind"})
+ThemeManager:SetFolder("MehfilLua/themes"); SaveManager:SetFolder("MehfilLua/settings")
+
+local function dWS()
+    local vp=Camera.ViewportSize; local mob=UIS.TouchEnabled and not UIS.MouseEnabled; local W,H
+    if mob then W=math.min(580,vp.X-20); H=340; if vp.X<500 then W=vp.X-16; H=300 end
+    else W=(vp.X>=1920 and 760 or vp.X>=1366 and 700 or vp.X>=1024 and 660 or 600); H=math.min(480,vp.Y-40) end
+    return UDim2.fromOffset(W,H)
+end
+
+task.wait()
+local Window = Library:CreateWindow({Title="mehfil",Center=true,AutoShow=true,TabPadding=8,MenuFadeTime=0.2,Size=dWS()})
+_holder = Window and Window.Holder or nil
+if _holder then _mopen = _holder.Visible==true; _holder:GetPropertyChangedSignal("Visible"):Connect(function() _mopen=_holder.Visible==true end) end
+
+local VoidTab = Window:AddTab("Void")
+local CombatTab = Window:AddTab("Combat")
+local MovementTab = Window:AddTab("Movement")
+local VisualsTab = Window:AddTab("Visuals")
+local ESPTab = Window:AddTab("ESP")
+local SettingsTab = Window:AddTab("Settings")
+
+task.wait()
+
+local vg1 = VoidTab:AddLeftGroupbox("Void")
+vg1:AddToggle("VoidHide", {Text="Void Hide",Default=false,Callback=function(v) if v then startVoid() else stopVoid() end end})
+
+local aa = VoidTab:AddLeftGroupbox("Anti-Aim")
+aa:AddToggle("AAEnable", {Text="Anti-Aim",Default=false,Callback=function(v) S.aaEnabled=v; if v then startAA() else stopAA() end end})
+aa:AddDropdown("AAPitch", {Text="AA Pitch",Values={"None","Flip","Up","Down"},Default="None",Callback=function(v) S.aaPitch=v end})
+aa:AddSlider("AAYaw", {Text="AA Yaw Range",Min=0,Max=360,Default=45,Rounding=0,Callback=function(v) S.aaYaw=v end})
+aa:AddDropdown("AAMode", {Text="AA Mode",Values={"None","Jitter","Sway","Inverter","Spin"},Default="None",Callback=function(v) S.aaMode=v; if S.aaEnabled then startAA() end end})
+aa:AddSlider("AASpeed", {Text="AA Speed",Min=1,Max=50,Default=15,Rounding=0,Callback=function(v) S.aaSpeed=v end})
+aa:AddToggle("AASpin", {Text="AA Spin (Random)",Default=false,Callback=function(v) S.aaSpin=v end})
+
+local ac = VoidTab:AddLeftGroupbox("Anti-Close")
+ac:AddToggle("AC", {Text="Anti-Close",Default=false,Callback=function(v) S.acEnabled=v; if v then StartAC() else StopAC() end end})
+
+local ds = VoidTab:AddLeftGroupbox("HvH Desync")
+ds:AddToggle("FakeLag", {Text="Fake Lag",Default=false,Callback=function(v) S.fakeLagEnabled=v; if v then StartFakeLag() else StopFakeLag() end end})
+ds:AddSlider("FakeLagAmt", {Text="Lag Amount (ms)",Min=10,Max=500,Default=100,Rounding=0,Suffix="ms",Callback=function(v) S.fakeLagAmount=v end})
+ds:AddToggle("CFDesync", {Text="CFrame Desync",Default=false,Callback=function(v) S.cfDesyncEnabled=v; if v then StartCFDesync() else StopCFDesync() end end})
+ds:AddSlider("CFDesyncInt", {Text="Desync Intensity",Min=10,Max=200,Default=50,Rounding=0,Callback=function(v) S.cfDesyncIntensity=v end})
+
+local vr = VoidTab:AddRightGroupbox("Orbit")
+vr:AddToggle("OrbitEnable", {Text="Orbit",Default=false,Callback=function(v) if v then startOrbit() else stopOrbit() end end})
+vr:AddDropdown("OrbitTarget", {Text="Target",Values=EnemyNames(),Default="Closest",Callback=function(v) S.orbTarget=v end})
+vr:AddDropdown("OrbitStyle", {Text="Style",Values={"Circle","Random","Teleport","Figure 8","Spiral","Bounce","Orbit & Float"},Default="Circle",Callback=function(v) S.orbStyle=v end})
+vr:AddToggle("OrbitSemi", {Text="Semi-Strafe",Default=false,Callback=function(v) S.orbSemiStrafe=v end})
+vr:AddSlider("OrbitSpeed", {Text="Speed",Min=0.5,Max=3,Default=1,Rounding=1,Callback=function(v) S.orbSpeed=v end})
+vr:AddSlider("OrbitRad", {Text="Radius",Min=1,Max=10,Default=6,Rounding=0,Callback=function(v) S.orbRadius=v end})
+vr:AddSlider("OrbitH", {Text="Height",Min=0,Max=8,Default=4,Rounding=1,Callback=function(v) S.orbHeight=v end})
+vr:AddSlider("OrbitPhase", {Text="Phase",Min=0,Max=360,Default=0,Rounding=0,Callback=function(v) S.orbPhase=v end})
+
+local ar = VoidTab:AddRightGroupbox("Anti-Riot")
+ar:AddToggle("AntiRiot", {Text="Anti-Riot",Default=false,Callback=function(v) S.arEnabled=v; if v then task.spawn(arLoop) end end})
+ar:AddSlider("RiotDist", {Text="Distance",Min=1,Max=30,Default=10,Rounding=0,Callback=function(v) S.arDist=v end})
+ar:AddSlider("RiotH", {Text="Height",Min=-10,Max=10,Default=0,Rounding=0,Callback=function(v) S.arHeight=v end})
+ar:AddSlider("RiotRate", {Text="Update Rate",Min=0.1,Max=5,Default=0.5,Rounding=1,Callback=function(v) S.arRate=v end})
+
+local rv = VoidTab:AddRightGroupbox("Resolver")
+rv:AddToggle("ResolverEnable", {Text="Resolver Disruptor",Default=false,Callback=function(v) S.resolverEnabled=v; if v then StartResolver() else StopResolver() end end})
+rv:AddSlider("ResolverInt", {Text="Velocity Intensity",Min=10,Max=500,Default=100,Rounding=0,Callback=function(v) S.resolverIntensity=v end})
+local hb = VoidTab:AddRightGroupbox("Hitbox Extender")
+hb:AddToggle("HBEnable", {Text="Hitbox Extender",Default=false,Callback=function(v) S.hbEnabled=v; if v then StartHitbox() else StopHitbox() end end})
+hb:AddSlider("HBSize", {Text="Hitbox Size",Min=1,Max=5,Default=1.5,Rounding=1,Callback=function(v) S.hbSize=v end})
+
+local tpL = CombatTab:AddLeftGroupbox("Teleport")
+tpL:AddToggle("TPEnable", {Text="Spam Teleport",Default=false,Callback=function(v) if v then StartTP() else StopTP() end end})
+tpL:AddDropdown("TPTarget", {Text="Target",Values=EnemyNames(),Default="Closest",Callback=function(v) S.tpTarget=v end})
+tpL:AddDropdown("TPMethod", {Text="Method",Values={"Void Randomizer","Void Extreme"},Default="Void Extreme",Callback=function(v) S.tpMethod=v end})
+tpL:AddSlider("TPMin", {Text="Min Distance",Min=1,Max=30,Default=3,Rounding=0,Callback=function(v) S.tpMinDist=v end})
+tpL:AddSlider("TPMax", {Text="Max Distance",Min=1,Max=30,Default=3,Rounding=0,Callback=function(v) S.tpMaxDist=v end})
+tpL:AddSlider("TPSpam", {Text="Spam Rate",Min=0.005,Max=0.5,Default=0.015,Rounding=3,Suffix="s",Callback=function(v) S.tpSpamRate=v end})
+tpL:AddToggle("TeamCheck", {Text="Team Check",Default=true,Callback=function(v) S.teamCheck=v end})
+tpL:AddToggle("AutoOpp", {Text="Auto Opponent",Default=true,Callback=function(v) S.autoOpp=v; S.autoOppNtf=false end})
+tpL:AddDivider()
+tpL:AddLabel("Cycle Timers (0=off)")
+tpL:AddSlider("CycVoidT", {Text="Void Time",Min=0,Max=30,Default=0,Rounding=1,Suffix="s",Callback=function(v) S.cycVoid=v end})
+tpL:AddSlider("CycEnemyT", {Text="Enemy Time",Min=0,Max=30,Default=0,Rounding=1,Suffix="s",Callback=function(v) S.cycEnemy=v end})
+tpL:AddDivider()
+tpL:AddLabel("Direction Offsets")
+tpL:AddSlider("DirXp", {Text="+X",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dXp=v end})
+tpL:AddSlider("DirXm", {Text="-X",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dXm=v end})
+tpL:AddSlider("DirYp", {Text="+Y",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dYp=v end})
+tpL:AddSlider("DirYm", {Text="-Y",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dYm=v end})
+tpL:AddSlider("DirZp", {Text="+Z",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dZp=v end})
+tpL:AddSlider("DirZm", {Text="-Z",Min=0,Max=30,Default=0,Rounding=0,Callback=function(v) S.dZm=v end})
+
+local aimL = CombatTab:AddLeftGroupbox("Aimbot")
+aimL:AddToggle("AimEnable", {Text="Aimbot",Default=false,Callback=function(v) S.aimEnabled=v end})
+aimL:AddSlider("AimSmooth", {Text="Smoothness",Min=1,Max=100,Default=100,Rounding=0,Suffix="%",Callback=function(v) S.aimSmoothness=v/100 end})
+aimL:AddToggle("AimShowFOV", {Text="Show FOV",Default=false,Callback=function(v) S.aimShowFOV=v end})
+aimL:AddSlider("AimFOVSize", {Text="FOV Radius",Min=50,Max=1000,Default=200,Rounding=0,Callback=function(v) S.aimFOVRadius=v end})
+aimL:AddLabel("Outline Color 1"):AddColorPicker("AimOutCol1", {Default=Color3.new(1,1,1),Callback=function(c) S.aimFOVCfg.OutlineColor1=c; local cfg=S.aimFOVCfg; S.aimFOVStrokeGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.OutlineColor1),ColorSequenceKeypoint.new(1,cfg.OutlineColor2)}) end})
+aimL:AddLabel("Outline Color 2"):AddColorPicker("AimOutCol2", {Default=Color3.new(1,1,1),Callback=function(c) S.aimFOVCfg.OutlineColor2=c; local cfg=S.aimFOVCfg; S.aimFOVStrokeGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.OutlineColor1),ColorSequenceKeypoint.new(1,cfg.OutlineColor2)}) end})
+aimL:AddToggle("AimFOVFill", {Text="FOV Fill",Default=false,Callback=function(v) S.aimFOVCfg.FilledEnabled=v; S.aimFOVFill.Visible=v end})
+aimL:AddLabel("Fill Color 1"):AddColorPicker("AimFillCol1", {Default=Color3.new(1,1,1),Callback=function(c) S.aimFOVCfg.FilledColor1=c; local cfg=S.aimFOVCfg; S.aimFOVFillGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.FilledColor1),ColorSequenceKeypoint.new(1,cfg.FilledColor2)}) end})
+aimL:AddLabel("Fill Color 2"):AddColorPicker("AimFillCol2", {Default=Color3.new(0,0,0),Callback=function(c) S.aimFOVCfg.FilledColor2=c; local cfg=S.aimFOVCfg; S.aimFOVFillGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.FilledColor1),ColorSequenceKeypoint.new(1,cfg.FilledColor2)}) end})
+aimL:AddToggle("AimFillAnim", {Text="Animated Fill",Default=false,Callback=function(v) S.aimFOVCfg.FilledAnimated=v end})
+aimL:AddSlider("AimFillSpd", {Text="Fill Speed",Min=0.1,Max=10,Default=1,Rounding=1,Callback=function(v) S.aimFOVCfg.FilledSpeed=v end})
+aimL:AddToggle("AimFOVSpin", {Text="FOV Spin",Default=false,Callback=function(v) S.aimFOVCfg.SpinOn=v end})
+aimL:AddSlider("AimSpinSpd", {Text="Spin Speed",Min=0.1,Max=10,Default=1,Rounding=1,Callback=function(v) S.aimFOVCfg.SpinSpd=v end})
+aimL:AddSlider("AimOutThick", {Text="Outline Thickness",Min=0.5,Max=5,Default=1.5,Rounding=1,Callback=function(v) S.aimFOVCfg.OutlineThickness=v; S.aimFOVStroke.Thickness=v end})
+aimL:AddSlider("AimOutTrans", {Text="Outline Transparency",Min=0,Max=1,Default=0,Rounding=2,Callback=function(v) S.aimFOVCfg.OutlineTransparency=v; S.aimFOVStroke.Transparency=v end})
+aimL:AddSlider("AimFillTrans", {Text="Fill Transparency",Min=0,Max=1,Default=0.7,Rounding=2,Callback=function(v) S.aimFOVCfg.FilledTransparency=v; S.aimFOVFill.BackgroundTransparency=v end})
+aimL:AddToggle("AimFollowTarget", {Text="Follow Target",Default=false,Callback=function(v) S.aimFollowTarget=v end})
+aimL:AddSlider("AimFollowSmth", {Text="Follow Smoothness",Min=0,Max=15,Default=0,Rounding=0,Callback=function(v) S.aimFollowSmoothness=v end})
+
+local sil = CombatTab:AddRightGroupbox("Silent Aim")
+sil:AddToggle("SilEnable", {Text="Silent Aim",Default=false,Callback=function(v) S.silentEnabled=v end})
+sil:AddDropdown("SilPart", {Text="Hit Part",Values={"Head","UpperTorso","HumanoidRootPart"},Default="Head",Callback=function(v) S.silentHitPart=v end})
+sil:AddSlider("SilChance", {Text="Hit Chance",Min=0,Max=100,Default=100,Rounding=0,Suffix="%",Callback=function(v) S.silentHitChance=v end})
+sil:AddToggle("SilShowFOV", {Text="Show FOV",Default=true,Callback=function(v) S.silentShowFOV=v end})
+sil:AddSlider("SilFOVSize", {Text="FOV Radius",Min=50,Max=1000,Default=300,Rounding=0,Callback=function(v) S.silentFOVRadius=v end})
+sil:AddLabel("Outline Color 1"):AddColorPicker("SilOutCol1", {Default=Color3.new(1,1,1),Callback=function(c) S.silentFOVCfg.OutlineColor1=c; local cfg=S.silentFOVCfg; S.silFOVStrokeGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.OutlineColor1),ColorSequenceKeypoint.new(1,cfg.OutlineColor2)}) end})
+sil:AddLabel("Outline Color 2"):AddColorPicker("SilOutCol2", {Default=Color3.new(1,1,1),Callback=function(c) S.silentFOVCfg.OutlineColor2=c; local cfg=S.silentFOVCfg; S.silFOVStrokeGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.OutlineColor1),ColorSequenceKeypoint.new(1,cfg.OutlineColor2)}) end})
+sil:AddToggle("SilFOVFill", {Text="FOV Fill",Default=false,Callback=function(v) S.silentFOVCfg.FilledEnabled=v; S.silFOVFill.Visible=v end})
+sil:AddLabel("Fill Color 1"):AddColorPicker("SilFillCol1", {Default=Color3.new(1,1,1),Callback=function(c) S.silentFOVCfg.FilledColor1=c; local cfg=S.silentFOVCfg; S.silFOVFillGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.FilledColor1),ColorSequenceKeypoint.new(1,cfg.FilledColor2)}) end})
+sil:AddLabel("Fill Color 2"):AddColorPicker("SilFillCol2", {Default=Color3.new(0,0,0),Callback=function(c) S.silentFOVCfg.FilledColor2=c; local cfg=S.silentFOVCfg; S.silFOVFillGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,cfg.FilledColor1),ColorSequenceKeypoint.new(1,cfg.FilledColor2)}) end})
+sil:AddToggle("SilFillAnim", {Text="Animated Fill",Default=false,Callback=function(v) S.silentFOVCfg.FilledAnimated=v end})
+sil:AddSlider("SilFillSpd", {Text="Fill Speed",Min=0.1,Max=10,Default=1,Rounding=1,Callback=function(v) S.silentFOVCfg.FilledSpeed=v end})
+sil:AddToggle("SilFOVSpin", {Text="FOV Spin",Default=false,Callback=function(v) S.silentFOVCfg.SpinOn=v end})
+sil:AddSlider("SilSpinSpd", {Text="Spin Speed",Min=0.1,Max=10,Default=1,Rounding=1,Callback=function(v) S.silentFOVCfg.SpinSpd=v end})
+sil:AddSlider("SilOutThick", {Text="Outline Thickness",Min=0.5,Max=5,Default=1.5,Rounding=1,Callback=function(v) S.silentFOVCfg.OutlineThickness=v; S.silFOVStroke.Thickness=v end})
+sil:AddSlider("SilOutTrans", {Text="Outline Transparency",Min=0,Max=1,Default=0,Rounding=2,Callback=function(v) S.silentFOVCfg.OutlineTransparency=v; S.silFOVStroke.Transparency=v end})
+sil:AddSlider("SilFillTrans", {Text="Fill Transparency",Min=0,Max=1,Default=0.7,Rounding=2,Callback=function(v) S.silentFOVCfg.FilledTransparency=v; S.silFOVFill.BackgroundTransparency=v end})
+sil:AddToggle("SilFollowTarget", {Text="Follow Target",Default=false,Callback=function(v) S.silentFollowTarget=v end})
+sil:AddSlider("SilFollowSmth", {Text="Follow Smoothness",Min=0,Max=15,Default=0,Rounding=0,Callback=function(v) S.silentFollowSmoothness=v end})
+
+local cr = CombatTab:AddRightGroupbox("Weapon")
+cr:AddToggle("RF", {Text="Rapid Fire",Default=false,Callback=function(v) S.rfEnabled=v; if v then doRF() end end})
+cr:AddToggle("MB", {Text="Melee Bypass",Default=false,Callback=function(v) S.mbEnabled=v; if v then doMB() end end})
+cr:AddToggle("FR", {Text="Fast Reload",Default=false,Callback=function(v) S.frEnabled=v; if v then doFR() end end})
+
+local wb = CombatTab:AddRightGroupbox("Wallbang")
+wb:AddToggle("WB", {Text="Wallbang",Default=false,Callback=function(v) S.wbEnabled=v; if v then StartWB() else StopWB() end end})
+local tg = CombatTab:AddRightGroupbox("Triggerbot")
+tg:AddToggle("TriggerBot", {Text="Triggerbot",Default=false,Callback=function(v) S.tgEnabled=v; if v then StartTriggerbot() else StopTriggerbot() end end})
+tg:AddSlider("TriggerDelay", {Text="Shot Delay",Min=0.01,Max=1,Default=0.1,Rounding=2,Suffix="s",Callback=function(v) S.tgDelay=v end})
+
+local ml = MovementTab:AddLeftGroupbox("Movement")
+ml:AddToggle("Fly", {Text="Fly",Default=false,Callback=function(v) S.flyEnabled=v; if v then StartFly() else StopFly() end end})
+ml:AddSlider("FlySpeed", {Text="Fly Speed",Min=10,Max=200,Default=50,Rounding=0,Callback=function(v) S.flySpeed=v end})
+ml:AddToggle("NC", {Text="Noclip",Default=false,Callback=function(v) S.ncEnabled=v end})
+ml:AddToggle("DJ", {Text="Double Jump",Default=false,Callback=function(v) S.djEnabled=v end})
+
+local mr = MovementTab:AddRightGroupbox("HvH Movement")
+mr:AddToggle("Blink", {Text="Blink",Default=false,Callback=function(v) S.blEnabled=v; if v then StartBlink() else StopBlink() end end})
+mr:AddSlider("BlinkRad", {Text="Blink Radius",Min=10,Max=200,Default=80,Rounding=0,Callback=function(v) S.blRadius=v end})
+mr:AddSlider("BlinkRate", {Text="Blink Rate",Min=1,Max=120,Default=60,Rounding=0,Callback=function(v) S.blRate=v end})
+mr:AddToggle("Evasion", {Text="Evasion",Default=false,Callback=function(v) S.evEnabled=v; if v then StartEvasion() else StopEvasion() end end})
+mr:AddSlider("EvIntensity", {Text="Intensity",Min=0.5,Max=10,Default=3,Rounding=1,Callback=function(v) S.evIntensity=v end})
+mr:AddToggle("FakePos", {Text="Fake Position",Default=false,Callback=function(v) S.fpEnabled=v; if v then StartFP() else StopFP() end end})
+mr:AddToggle("Desync", {Text="Velocity Desync",Default=false,Callback=function(v) S.dsEnabled=v; if v then StartDS() else StopDS() end end})
+local mm = MovementTab:AddLeftGroupbox("Movement Mods")
+mm:AddToggle("WSEnable", {Text="Walk Speed",Default=false,Callback=function(v) S.wsEnabled=v; if not S.mmConn then StartMovementMods() end end})
+mm:AddSlider("WalkSpeed", {Text="Speed",Min=16,Max=200,Default=16,Rounding=0,Callback=function(v) S.walkSpeed=v end})
+mm:AddToggle("JPEnable", {Text="Jump Power",Default=false,Callback=function(v) S.jpEnabled=v; if not S.mmConn then StartMovementMods() end end})
+mm:AddSlider("JumpPower", {Text="Power",Min=50,Max=300,Default=50,Rounding=0,Callback=function(v) S.jumpPower=v end})
+mm:AddToggle("GVEnable", {Text="Gravity",Default=false,Callback=function(v) S.gvEnabled=v; if not S.mmConn then StartMovementMods() end end})
+mm:AddSlider("Gravity", {Text="Gravity",Min=0,Max=500,Default=196.2,Rounding=1,Callback=function(v) S.gravity=v end})
+
+local Lighting = game:GetService("Lighting")
+local function StartWeather()
+    if S.weatherPart then return end
+    local camPart = Instance.new("Part"); camPart.Name = "MehfilWeatherAnchor"
+    camPart.Size = Vector3.new(1, 1, 1); camPart.Anchored = true; camPart.CanCollide = false
+    camPart.Transparency = 1; camPart.Material = Enum.Material.SmoothPlastic
+    camPart.Parent = workspace
+    S.weatherPart = camPart
+
+    local function makeEmitter(parent, cfg)
+        local e = Instance.new("ParticleEmitter", parent)
+        e.Rate = cfg.Rate; e.Speed = cfg.Speed; e.Acceleration = cfg.Acceleration
+        e.Lifetime = cfg.Lifetime; e.Size = cfg.Size; e.Color = cfg.Color
+        e.Transparency = cfg.Transparency; e.LightEmission = cfg.LightEmission
+        e.LightInfluence = 0; e.SpreadAngle = cfg.SpreadAngle
+        e.EmissionDirection = cfg.EmissionDirection or Enum.NormalId.Bottom
+        e.Orientation = Enum.ParticleOrientation.VelocityParallel
+        e.ZOffset = cfg.ZOffset or 0; e.Squash = cfg.Squash or 0
+        e.Drag = cfg.Drag or 0; e.RotSpeed = cfg.RotSpeed or NumberRange.new(0)
+        return e
+    end
+    local att = Instance.new("Attachment", camPart); att.Name = "WeatherAttach"
+    if S.weatherType == "Rain" then
+
+        S.weatherEmitter = makeEmitter(att, {
+            Rate = S.weatherDensity * 3,
+            Speed = NumberRange.new(S.weatherSpeed * 80, S.weatherSpeed * 120),
+            Acceleration = Vector3.new(0, -300, 0),
+            Lifetime = NumberRange.new(0.5, 1.2),
+            Size = NumberSequence.new(S.weatherSize * 0.04, S.weatherSize * 0.02),
+            Color = ColorSequence.new(S.weatherColor),
+            Transparency = NumberSequence.new(0.4, 0.9),
+            LightEmission = 0.15,
+            SpreadAngle = Vector2.new(2, 2),
+            EmissionDirection = Enum.NormalId.Bottom,
+            ZOffset = 0,
+            Squash = -0.85,
+            Drag = 0.1,
+            RotSpeed = NumberRange.new(-20, 20)
+        })
+    else
+
+        S.weatherEmitter = makeEmitter(att, {
+            Rate = S.weatherDensity,
+            Speed = NumberRange.new(S.weatherSpeed * 4, S.weatherSpeed * 12),
+            Acceleration = Vector3.new(math.random(-8, 8), -20, math.random(-8, 8)),
+            Lifetime = NumberRange.new(3, 7),
+            Size = NumberSequence.new(S.weatherSize * 0.6, S.weatherSize * 0.3),
+            Color = ColorSequence.new(S.weatherColor),
+            Transparency = NumberSequence.new(0.1, 0.6),
+            LightEmission = 0.3,
+            SpreadAngle = Vector2.new(50, 50),
+            EmissionDirection = Enum.NormalId.Bottom,
+            ZOffset = 20,
+            Squash = 0,
+            Drag = 0.5,
+            RotSpeed = NumberRange.new(-60, 60)
+        })
+    end
+    S.weatherEmitter.Enabled = true
+
+    S.weatherConn = RunService.RenderStepped:Connect(function()
+        if not S.weatherEnabled or not S.weatherPart or not Camera then return end
+        local cf = Camera.CFrame
+        S.weatherPart.CFrame = CFrame.new(cf.Position + cf.LookVector * 8 + Vector3.new(0, 18, 0))
+    end)
+
+    local sid = S.weatherSounds[S.weatherType]
+    if sid and S.weatherVolume > 0 then
+        local snd = Instance.new("Sound"); snd.SoundId = sid; snd.Volume = S.weatherVolume
+        snd.Looped = true; snd.Parent = workspace; snd:Play(); S.weatherSound = snd
+    end
+end
+local function StopWeather()
+    if S.weatherConn then S.weatherConn:Disconnect(); S.weatherConn = nil end
+    if S.weatherSound then S.weatherSound:Stop(); S.weatherSound:Destroy(); S.weatherSound = nil end
+    if S.weatherEmitter then S.weatherEmitter:Destroy(); S.weatherEmitter = nil end
+    if S.weatherPart then S.weatherPart:Destroy(); S.weatherPart = nil end
+end
+local function RefreshWeather()
+    if not S.weatherEnabled then StopWeather(); return end
+    StopWeather(); task.wait(0.05); S.weatherPart = nil; S.weatherEmitter = nil; StartWeather()
+end
+
+local function EnsurePostEffect(name, className)
+    local existing = Lighting:FindFirstChild(name)
+    if existing then return existing end
+    local fx = Instance.new(className); fx.Name = name; fx.Enabled = false; fx.Parent = Lighting
+    return fx
+end
+local function ApplyPostProcessing()
+    if not (S.mbEnabled or S.bloomEnabled or S.srEnabled or S.ccEnabled or S.fogEnabled or S.customTime or S.atmoEnabled or S.shadowSoftness ~= 0.5) then return end
+
+    local blur = EnsurePostEffect("MehfilBlur", "BlurEffect")
+    blur.Enabled = S.mbEnabled; blur.Size = S.mbIntensity * 56
+
+    local bloom = EnsurePostEffect("MehfilBloom", "BloomEffect")
+    bloom.Enabled = S.bloomEnabled; bloom.Intensity = S.bloomIntensity
+    bloom.Size = S.bloomSize; bloom.Threshold = S.bloomThreshold
+
+    local sr = EnsurePostEffect("MehfilSunRays", "SunRaysEffect")
+    sr.Enabled = S.srEnabled; sr.Intensity = S.srIntensity; sr.Spread = S.srSpread
+
+    local cc = EnsurePostEffect("MehfilCC", "ColorCorrectionEffect")
+    cc.Enabled = S.ccEnabled; cc.Brightness = S.ccBrightness; cc.Contrast = S.ccContrast
+    cc.Saturation = S.ccSaturation; cc.TintColor = S.ccTintColor
+
+    if S.fogEnabled then
+        Lighting.FogColor = S.fogColor; Lighting.FogStart = S.fogStart; Lighting.FogEnd = S.fogEnd
+    else Lighting.FogEnd = 100000 end
+
+    if S.shadowSoftness ~= 0.5 then
+        pcall(function() Lighting.GlobalShadows = true end)
+        Lighting.EnvironmentDiffuseScale = 1 - (S.shadowSoftness * 0.5)
+        Lighting.EnvironmentSpecularScale = 1 - (S.shadowSoftness * 0.3)
+    end
+
+    if S.customTime then
+        Lighting.ClockTime = S.timeHour; Lighting.Brightness = S.customBrightness
+    end
+
+    local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+    if S.atmoEnabled then
+        if not atmo then atmo = Instance.new("Atmosphere"); atmo.Parent = Lighting end
+        atmo.Density = S.atmoDensity; atmo.Offset = S.atmoOffset; atmo.Haze = S.atmoHaze
+        atmo.Glare = S.atmoGlare; atmo.Color = S.atmoColor; atmo.Decay = S.atmoDecay
+    elseif atmo and not S.atmoEnabled then
+        pcall(function() atmo:Destroy() end)
+    end
+end
+
+local origLighting = {}
+local function SaveOrigLighting()
+    if origLighting.Brightness ~= nil then return end
+    origLighting = {
+        Brightness = Lighting.Brightness, ClockTime = Lighting.ClockTime,
+        FogColor = Lighting.FogColor, FogStart = Lighting.FogStart, FogEnd = Lighting.FogEnd,
+        Ambient = Lighting.Ambient, OutdoorAmbient = Lighting.OutdoorAmbient,
+        ColorShift_Top = Lighting.ColorShift_Top, ColorShift_Bottom = Lighting.ColorShift_Bottom,
+        ExposureCompensation = Lighting.ExposureCompensation
+    }
+end
+local function RestoreOrigLighting()
+    if not origLighting.Brightness then return end
+    pcall(function()
+        Lighting.Brightness = origLighting.Brightness; Lighting.ClockTime = origLighting.ClockTime
+        Lighting.FogColor = origLighting.FogColor; Lighting.FogStart = origLighting.FogStart
+        Lighting.FogEnd = origLighting.FogEnd; Lighting.Ambient = origLighting.Ambient
+        Lighting.OutdoorAmbient = origLighting.OutdoorAmbient
+        Lighting.ColorShift_Top = origLighting.ColorShift_Top
+        Lighting.ColorShift_Bottom = origLighting.ColorShift_Bottom
+        Lighting.ExposureCompensation = origLighting.ExposureCompensation
+    end)
+end
+SaveOrigLighting()
+
+RunService:BindToRenderStep("MehfilVisuals", Enum.RenderPriority.Camera.Value + 1, function()
+    ApplyPostProcessing()
+end)
+
+local chG = VisualsTab:AddRightGroupbox("Rainbow Chams")
+chG:AddToggle("ChamsEnable",{Text="Enable Chams",Default=false,Callback=function(v) S.chamsEnabled=v; if v then StartChams() else StopChams() end end})
+chG:AddToggle("ChamsGlow",{Text="Rainbow Color",Default=false,Callback=function(v) S.chamsGlow=v end})
+chG:AddLabel("Color"):AddColorPicker("ChamsColor",{Default=Color3.new(1,0,0),Callback=function(c) S.chamsColor=c end})
+chG:AddSlider("ChamsTrans",{Text="Transparency",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) S.chamsTransparency=v end})
+
+local tpV = VisualsTab:AddLeftGroupbox("Camera")
+tpV:AddToggle("ThirdPerson",{Text="Third Person Force",Default=false,Callback=function(v) S.thirdPerson=v; if v then StartThirdPerson() else StopThirdPerson() end end})
+
+local trL = VisualsTab:AddLeftGroupbox("Bullet Tracers")
+trL:AddToggle("Tracers", {Text="Bullet Tracers",Default=false,Callback=function(v) S.trEnabled=v end})
+trL:AddLabel("Color"):AddColorPicker("TrColor", {Default=Color3.new(1,1,1),Callback=function(c) S.trColor=c end})
+trL:AddDropdown("TrStyle", {Text="Style",Values={"Line","Beam","Lightning","Neon","Laser"},Default="Line",Callback=function(v) S.trStyle=v end})
+trL:AddSlider("TrGlow", {Text="Glow",Min=0,Max=1,Default=0,Rounding=1,Callback=function(v) S.trGlow=v end})
+trL:AddSlider("TrSize", {Text="Size",Min=0.5,Max=5,Default=1,Rounding=1,Callback=function(v) S.trSize=v end})
+trL:AddSlider("TrDur", {Text="Duration",Min=0.5,Max=10,Default=3,Rounding=1,Suffix="s",Callback=function(v) S.trDuration=v end})
+trL:AddSlider("TrFade", {Text="Fade",Min=0,Max=2,Default=0.5,Rounding=1,Suffix="s",Callback=function(v) S.trFadeTime=v end})
+
+local hsG = VisualsTab:AddRightGroupbox("Hit Sounds")
+hsG:AddToggle("HS", {Text="Hit Sounds",Default=false,Callback=function(v) S.hsEnabled=v end})
+hsG:AddDropdown("HSStyle", {Text="Style",Values={"Rust HS","Neverlose","Minecraft","CSGO","Bubble","Bonk","Fatality","Skeet","Bruh","Fart","Gamesense","Call of Duty","TF2"},Default="Rust HS",Callback=function(v) S.hsStyle=v end})
+hsG:AddSlider("HSVol", {Text="Volume",Min=0,Max=1,Default=0.5,Rounding=1,Callback=function(v) S.hsVolume=v end})
+hsG:AddSlider("HSPitch", {Text="Pitch",Min=0.5,Max=2,Default=1,Rounding=1,Callback=function(v) S.hsPitch=v end})
+
+local wxL = VisualsTab:AddLeftGroupbox("Weather")
+wxL:AddToggle("WeatherEnable", {Text="Weather",Default=false,Callback=function(v) S.weatherEnabled=v; if v then StartWeather() else StopWeather() end end})
+wxL:AddDropdown("WeatherType", {Text="Type",Values={"Rain","Snow"},Default="Rain",Callback=function(v) S.weatherType=v; if S.weatherEnabled then RefreshWeather() end end})
+wxL:AddSlider("WeatherVol", {Text="Volume",Min=0,Max=10,Default=1,Rounding=1,Callback=function(v) S.weatherVolume=v; if S.weatherSound then S.weatherSound.Volume=v end end})
+wxL:AddSlider("WeatherSpeed", {Text="Speed",Min=0.1,Max=3,Default=1,Rounding=1,Callback=function(v) S.weatherSpeed=v; if S.weatherEmitter then if S.weatherType=="Rain" then S.weatherEmitter.Speed=NumberRange.new(v*80,v*120) else S.weatherEmitter.Speed=NumberRange.new(v*4,v*12) end end end})
+wxL:AddSlider("WeatherSize", {Text="Particle Size",Min=0.1,Max=3,Default=1,Rounding=1,Callback=function(v) S.weatherSize=v; if S.weatherEmitter then if S.weatherType=="Rain" then S.weatherEmitter.Size=NumberSequence.new(v*0.04,v*0.02) else S.weatherEmitter.Size=NumberSequence.new(v*0.6,v*0.3) end end end})
+wxL:AddSlider("WeatherDensity", {Text="Density",Min=10,Max=500,Default=100,Rounding=0,Callback=function(v) S.weatherDensity=v; if S.weatherEmitter then S.weatherEmitter.Rate=v end end})
+wxL:AddLabel("Particle Color"):AddColorPicker("WeatherColor", {Default=Color3.new(1,1,1),Callback=function(c) S.weatherColor=c; if S.weatherEmitter then S.weatherEmitter.Color=ColorSequence.new(c) end end})
+
+local ppL = VisualsTab:AddLeftGroupbox("Post-Processing")
+ppL:AddToggle("MBEnable", {Text="Motion Blur",Default=false,Callback=function(v) S.mbEnabled=v end})
+ppL:AddSlider("MBIntensity", {Text="Blur Intensity",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) S.mbIntensity=v end})
+ppL:AddToggle("BloomEnable", {Text="Bloom",Default=false,Callback=function(v) S.bloomEnabled=v end})
+ppL:AddSlider("BloomIntensity", {Text="Bloom Intensity",Min=0,Max=3,Default=0.5,Rounding=2,Callback=function(v) S.bloomIntensity=v end})
+ppL:AddSlider("BloomSize", {Text="Bloom Size",Min=1,Max=56,Default=24,Rounding=0,Callback=function(v) S.bloomSize=v end})
+ppL:AddSlider("BloomThreshold", {Text="Bloom Threshold",Min=0,Max=1,Default=0.8,Rounding=2,Callback=function(v) S.bloomThreshold=v end})
+ppL:AddToggle("SREnable", {Text="Sun Rays",Default=false,Callback=function(v) S.srEnabled=v end})
+ppL:AddSlider("SRIntensity", {Text="Ray Intensity",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) S.srIntensity=v end})
+ppL:AddSlider("SRSpread", {Text="Ray Spread",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) S.srSpread=v end})
+
+local ccG = VisualsTab:AddRightGroupbox("Color Correction")
+ccG:AddToggle("CCEnable", {Text="Enable",Default=false,Callback=function(v) S.ccEnabled=v end})
+ccG:AddSlider("CCBrightness", {Text="Brightness",Min=-1,Max=1,Default=0,Rounding=2,Callback=function(v) S.ccBrightness=v end})
+ccG:AddSlider("CCContrast", {Text="Contrast",Min=-1,Max=1,Default=0,Rounding=2,Callback=function(v) S.ccContrast=v end})
+ccG:AddSlider("CCSaturation", {Text="Saturation",Min=-1,Max=1,Default=0,Rounding=2,Callback=function(v) S.ccSaturation=v end})
+ccG:AddLabel("Tint"):AddColorPicker("CCTint", {Default=Color3.new(1,1,1),Callback=function(c) S.ccTintColor=c end})
+
+local mvG = VisualsTab:AddRightGroupbox("Map Visuals")
+mvG:AddToggle("FogEnable", {Text="Custom Fog",Default=false,Callback=function(v) S.fogEnabled=v end})
+mvG:AddLabel("Fog Color"):AddColorPicker("FogColor", {Default=Color3.new(0.7,0.7,0.7),Callback=function(c) S.fogColor=c end})
+mvG:AddSlider("FogStart", {Text="Fog Start",Min=0,Max=1000,Default=0,Rounding=0,Callback=function(v) S.fogStart=v end})
+mvG:AddSlider("FogEnd", {Text="Fog End",Min=10,Max=10000,Default=500,Rounding=0,Callback=function(v) S.fogEnd=v end})
+mvG:AddToggle("CustomTime", {Text="Custom Time",Default=false,Callback=function(v) S.customTime=v end})
+mvG:AddSlider("TimeHour", {Text="Hour",Min=0,Max=24,Default=12,Rounding=1,Callback=function(v) S.timeHour=v end})
+mvG:AddSlider("Brightness", {Text="Brightness",Min=0,Max=10,Default=2,Rounding=1,Callback=function(v) S.customBrightness=v end})
+mvG:AddSlider("ShadowSoft", {Text="Shadow Softness",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) S.shadowSoftness=v end})
+mvG:AddToggle("AtmoEnable", {Text="Atmosphere",Default=false,Callback=function(v) S.atmoEnabled=v end})
+mvG:AddSlider("AtmoDensity", {Text="Atmo Density",Min=0,Max=1,Default=0.3,Rounding=2,Callback=function(v) S.atmoDensity=v end})
+mvG:AddSlider("AtmoHaze", {Text="Atmo Haze",Min=0,Max=5,Default=1,Rounding=1,Callback=function(v) S.atmoHaze=v end})
+mvG:AddSlider("AtmoGlare", {Text="Atmo Glare",Min=0,Max=5,Default=0,Rounding=2,Callback=function(v) S.atmoGlare=v end})
+mvG:AddSlider("AtmoOffset", {Text="Atmo Offset",Min=0,Max=1,Default=0.25,Rounding=2,Callback=function(v) S.atmoOffset=v end})
+mvG:AddLabel("Atmo Color"):AddColorPicker("AtmoColor", {Default=Color3.new(1,1,1),Callback=function(c) S.atmoColor=c end})
+mvG:AddLabel("Atmo Decay"):AddColorPicker("AtmoDecay", {Default=Color3.new(0.5,0.5,0.5),Callback=function(c) S.atmoDecay=c end})
+local ch = VisualsTab:AddLeftGroupbox("Crosshair")
+ch:AddToggle("CrossEnable", {Text="Crosshair",Default=false,Callback=function(v) S.crossEnabled=v; if v then StartCrosshair() else StopCrosshair() end end})
+ch:AddLabel("Color"):AddColorPicker("CrossColor", {Default=Color3.new(0,1,0),Callback=function(c) S.crossColor=c end})
+ch:AddSlider("CrossSize", {Text="Size",Min=5,Max=50,Default=15,Rounding=0,Callback=function(v) S.crossSize=v end})
+ch:AddSlider("CrossThick", {Text="Thickness",Min=1,Max=8,Default=2,Rounding=0,Callback=function(v) S.crossThick=v end})
+ch:AddSlider("CrossGap", {Text="Gap",Min=0,Max=20,Default=4,Rounding=0,Callback=function(v) S.crossGap=v end})
+ch:AddToggle("CrossSpin", {Text="Spin",Default=false,Callback=function(v) S.crossSpin=v end})
+ch:AddSlider("CrossSpinSpd", {Text="Spin Speed",Min=0.5,Max=10,Default=2,Rounding=1,Callback=function(v) S.crossSpinSpeed=v end})
+
+local espG1 = ESPTab:AddLeftGroupbox("Player ESP")
+espG1:AddToggle("ESPEnable", {Text="Enable ESP",Default=false,Callback=function(v) S.espEnabled=v; ConfigBox.MasterEnabled=v; if v then espBindAll() else espUnbind() end end})
+espG1:AddToggle("ESPBox", {Text="Box",Default=false,Callback=function(v) ConfigBox.Enable=v end})
+espG1:AddLabel("Box Color"):AddColorPicker("ESPBoxCol", {Default=Color3.new(1,1,1),Callback=function(c) ConfigBox.OutlineColor=c end})
+espG1:AddLabel("Box Outline"):AddColorPicker("ESPBoxOutCol", {Default=Color3.new(0,0,0),Callback=function(c) ConfigBox.OutlineColor2=c end})
+
+local espG2 = ESPTab:AddLeftGroupbox("Info ESP")
+espG2:AddToggle("ESPHealth", {Text="Health Bar",Default=false,Callback=function(v) ConfigBox.Healthbar = ConfigBox.Healthbar or {}; ConfigBox.Healthbar.Enable=v end})
+espG2:AddToggle("ESPName", {Text="Name",Default=false,Callback=function(v) _G.Config.TextESP.Names=v end})
+espG2:AddLabel("Name Color"):AddColorPicker("ESPNameCol", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.TextESP.NameColor=c end})
+espG2:AddSlider("ESPNameSize", {Text="Name Size",Min=10,Max=20,Default=13,Rounding=0,Callback=function(v) _G.Config.TextESP.NameSize=v end})
+espG2:AddToggle("ESPDist", {Text="Distance",Default=false,Callback=function(v) _G.Config.TextESP.Distance=v end})
+espG2:AddLabel("Dist Color"):AddColorPicker("ESPDistCol", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.TextESP.DistanceColor=c end})
+espG2:AddSlider("ESPDistSize", {Text="Dist Size",Min=10,Max=18,Default=12,Rounding=0,Callback=function(v) _G.Config.TextESP.DistanceSize=v end})
+
+local espG3 = ESPTab:AddRightGroupbox("Lines")
+espG3:AddToggle("ESPTracers", {Text="Tracers",Default=false,Callback=function(v) _G.Config.Tracers.Enable=v end})
+espG3:AddLabel("Tracer Color"):AddColorPicker("ESPTracerCol", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.Tracers.Color=c end})
+espG3:AddSlider("ESPTracerThick", {Text="Tracer Thickness",Min=1,Max=5,Default=1,Rounding=0,Callback=function(v) _G.Config.Tracers.Thickness=v end})
+
+local espG4 = ESPTab:AddRightGroupbox("Settings")
+espG4:AddToggle("ESPTeamCheck", {Text="Team Check",Default=true,Callback=function(v) S.espTeamCheck=v end})
+espG4:AddSlider("ESPMaxDist", {Text="Max Distance",Min=100,Max=5000,Default=1000,Rounding=0,Callback=function(v) S.espMaxDist=v end})
+
+espG1:AddToggle("ESPFilled", {Text="Filled Box",Default=false,Callback=function(v) _G.Config.Filled.Enable=v end})
+espG1:AddLabel("Fill Color1"):AddColorPicker("ESPFillCol1", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.Filled.ColorStart=c end})
+espG1:AddLabel("Fill Color2"):AddColorPicker("ESPFillCol2", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.Filled.ColorEnd=c end})
+espG1:AddSlider("ESPFillTrans", {Text="Fill Transparency",Min=0,Max=1,Default=0.7,Rounding=2,Callback=function(v) _G.Config.Filled.Transparency=v end})
+
+espG3:AddToggle("ESPGlow", {Text="Glow",Default=false,Callback=function(v) _G.Config.Glow.Enable=v end})
+espG3:AddLabel("Glow Color1"):AddColorPicker("ESPGlowCol1", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.Glow.ColorStart=c end})
+espG3:AddLabel("Glow Color2"):AddColorPicker("ESPGlowCol2", {Default=Color3.new(1,1,1),Callback=function(c) _G.Config.Glow.ColorEnd=c end})
+espG3:AddSlider("ESPGlowTrans", {Text="Glow Transparency",Min=0,Max=1,Default=0.5,Rounding=2,Callback=function(v) _G.Config.Glow.Transparency=v end})
+
+local sl = SettingsTab:AddLeftGroupbox("Preferences")
+sl:AddToggle("KeybindMenu", {Text="Open Keybind Menu",Default=false,Callback=function(v) Library.KeybindFrame.Visible=v end})
+sl:AddToggle("WMEnable", {Text="Watermark",Default=true,Callback=function(v) S.wmEnabled=v end})
+
+local rm = sl:AddGroupbox("Removables")
+rm:AddToggle("NoShootAnim",{Text="No Shoot Animation",Default=false,Callback=function(v) S.noShootAnim=v end})
+rm:AddToggle("NoSprintAnim",{Text="No Sprint Animation",Default=false,Callback=function(v) S.noSprintAnim=v end})
+rm:AddToggle("NoEquipAnim",{Text="No Equip Animation",Default=false,Callback=function(v) S.noEquipAnim=v end})
+rm:AddToggle("NoReloadAnim",{Text="No Reload Animation",Default=false,Callback=function(v) S.noReloadAnim=v end})
+rm:AddToggle("NoMotion",{Text="No Motion",Default=false,Callback=function(v) S.noMotion=v end})
+rm:AddToggle("NoCamShake",{Text="No Camera Shake",Default=false,Callback=function(v) S.noCamShake=v end})
+rm:AddToggle("NoCamSway",{Text="No Camera Sway",Default=false,Callback=function(v) S.noCamSway=v end})
+rm:AddToggle("NoFlashbang",{Text="No Flashbang",Default=false,Callback=function(v) S.noFlashbang=v; if v then StartNoFlashbang() end end})
+rm:AddToggle("NoMuzzleFlash",{Text="No Muzzle Flash",Default=false,Callback=function(v) S.noMuzzleFlash=v end})
+rm:AddButton("Apply Removables",function() StartRemovables() end)
+sl:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {Default="End",NoUI=true,Text="Menu keybind"})
+Library.ToggleKeybind = Options.MenuKeybind
+SaveManager:BuildConfigSection(SettingsTab)
+ThemeManager:ApplyToTab(SettingsTab)
+
+local function loadConfigAsync()
+    if not isfile or not isfile("config.json") then return warn("[Mehfil] No config.json found") end
+    local ok, raw = pcall(readfile, "config.json")
+    if not ok then return warn("[Mehfil] Failed to read config.json") end
+    local HttpService = game:GetService("HttpService")
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, raw)
+    if not ok2 or not data or not data.objects then return warn("[Mehfil] Invalid config.json") end
+    local objects = data.objects
+    local total = #objects
+
+    local BATCH = 12
+    local count, skipped = 0, 0
+    local function applyOne(key, ctrl)
+        if not ctrl then return end
+        pcall(function() ctrl:SetValue(key) end)
+    end
+    for i = 1, total, BATCH do
+        local batchEnd = math.min(i + BATCH - 1, total)
+        for j = i, batchEnd do
+            local obj = objects[j]
+            local idx, t, val = obj.idx, obj.type, obj.value
+            local ctrl = Toggles[idx] or Options[idx]
+            if ctrl then
+                if t == "Toggle" then
+                    applyOne(val == true or val == "true", ctrl)
+                elseif t == "Slider" then
+                    local n = tonumber(val)
+                    if n then applyOne(n, ctrl) end
+                elseif t == "Dropdown" then
+                    applyOne(tostring(val), ctrl)
+                elseif t == "ColorPicker" then
+                    local hex = tostring(val or "ffffff")
+                    local r = tonumber(hex:sub(1,2), 16)
+                    local g = tonumber(hex:sub(3,4), 16)
+                    local b = tonumber(hex:sub(5,6), 16)
+                    if r and g and b then applyOne(Color3.fromRGB(r, g, b), ctrl) end
+                end
+                count = count + 1
+            else
+                skipped = skipped + 1
+            end
+        end
+
+        if batchEnd < total then task.wait() end
+    end
+    warn(string.format("[Mehfil] Config loaded: %d applied, %d skipped, %d total", count, skipped, total))
+end
+task.spawn(function() task.wait(0.5); loadConfigAsync() end)
+
+Library:OnUnload(function()
+    StopTP(); stopOrbit(); StopFly(); StopWB(); StopTracers(); stopVoid(); stopAA(); StopAC(); StopFP(); StopDS(); StopBlink(); StopEvasion(); espUnbind(); StopWeather(); StopFakeLag(); StopCFDesync(); StopResolver(); StopCrosshair(); StopTriggerbot(); StopMovementMods(); StopHitbox(); StopRemovables(); StopThirdPerson(); StopChams(); pcall(function() RunService:UnbindFromRenderStep("MehfilESP_Drawing") end); if S.espRenderConn then S.espRenderConn:Disconnect(); S.espRenderConn = nil end; local eg = CoreGui:FindFirstChild("MehfilESP"); if eg then pcall(function() eg:Destroy() end) end
+    if S.voidConn then S.voidConn:Disconnect() end
+    if S.orbConn then S.orbConn:Disconnect() end
+    if S.aaConn then S.aaConn:Disconnect() end
+    if S.flyConn then S.flyConn:Disconnect() end
+    if S.hsConn then S.hsConn:Disconnect() end
+    if S.fovRenderConn then S.fovRenderConn:Disconnect() end
+    pcall(function() RunService:UnbindFromRenderStep("MehfilVisuals") end)
+    RestoreOrigLighting()
+
+    for _, name in ipairs({"MehfilBlur","MehfilBloom","MehfilSunRays","MehfilCC"}) do
+        local fx = Lighting:FindFirstChild(name); if fx then fx:Destroy() end
+    end
+    local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+    if atmo then pcall(function() atmo:Destroy() end) end
+    pcall(function() if S.aimFOVContainer then S.aimFOVContainer:Destroy() end end)
+    pcall(function() if S.silFOVContainer then S.silFOVContainer:Destroy() end end)
+    pcall(function() if S.fovGui then S.fovGui:Destroy() end end)
+end)
+
+end)
+
+if mehfil_ok then warn("[mehfil] Loaded — HvH Edition"); warn("[mehfil] RightShift/F9=toggle End=keybind")
+else warn("[mehfil] FAILED: "..tostring(mehfil_err)) end
