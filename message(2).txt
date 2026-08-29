@@ -1,8 +1,3 @@
-local allowedPlaces = {99606176102979, 109983668079237}
-if not table.find(allowedPlaces, game.PlaceId) then
-    return
-end
--- // SERVICES //
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
